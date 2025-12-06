@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -35,7 +36,16 @@ public abstract class InMemoryRepository<T extends BaseEntity, ID> {
 
 	protected final AtomicInteger idGenerator = new AtomicInteger(1);
 
+	// Queue to reuse deleted IDs for memory efficiency in mixed workloads
+	protected final ConcurrentLinkedQueue<Integer> reusableIds = new ConcurrentLinkedQueue<>();
+
 	protected Integer generateId() {
+		// First try to reuse a deleted ID
+		Integer reusedId = reusableIds.poll();
+		if (reusedId != null) {
+			return reusedId;
+		}
+		// If no reusable IDs, generate a new one
 		return idGenerator.getAndIncrement();
 	}
 
@@ -56,11 +66,17 @@ public abstract class InMemoryRepository<T extends BaseEntity, ID> {
 	}
 
 	public void delete(T entity) {
-		storage.remove(entity.getId());
+		if (storage.remove(entity.getId()) != null) {
+			// Add the deleted ID to the reusable queue for ID reuse
+			reusableIds.offer(entity.getId());
+		}
 	}
 
 	public void deleteById(Integer id) {
-		storage.remove(id);
+		if (storage.remove(id) != null) {
+			// Add the deleted ID to the reusable queue for ID reuse
+			reusableIds.offer(id);
+		}
 	}
 
 	public boolean existsById(Integer id) {
@@ -73,6 +89,7 @@ public abstract class InMemoryRepository<T extends BaseEntity, ID> {
 
 	public void deleteAll() {
 		storage.clear();
+		reusableIds.clear();
 		idGenerator.set(1);
 	}
 
