@@ -15,9 +15,17 @@
  */
 package org.springframework.samples.petclinic.owner;
 
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Random;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -26,12 +34,20 @@ import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.validation.BindingResult;
 import org.springframework.web.bind.WebDataBinder;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.InitBinder;
 import org.springframework.web.bind.annotation.ModelAttribute;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseBody;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.servlet.ModelAndView;
 
 import jakarta.validation.Valid;
@@ -52,8 +68,13 @@ class OwnerController {
 
 	private final OwnerRepository owners;
 
-	public OwnerController(OwnerRepository owners) {
+	private final PetTypeRepository petTypes;
+
+	private final Random random = new Random();
+
+	public OwnerController(OwnerRepository owners, PetTypeRepository petTypes) {
 		this.owners = owners;
+		this.petTypes = petTypes;
 	}
 
 	@InitBinder
@@ -63,10 +84,21 @@ class OwnerController {
 
 	@ModelAttribute("owner")
 	public Owner findOwner(@PathVariable(name = "ownerId", required = false) Integer ownerId) {
-		return ownerId == null ? new Owner()
-				: this.owners.findById(ownerId)
-					.orElseThrow(() -> new IllegalArgumentException("Owner not found with id: " + ownerId
-							+ ". Please ensure the ID is correct " + "and the owner exists in the database."));
+		if (ownerId == null) {
+			return new Owner();
+		}
+
+		// For API requests or DELETE requests, don't throw exception if owner doesn't
+		// exist
+		ServletRequestAttributes attrs = (ServletRequestAttributes) RequestContextHolder.currentRequestAttributes();
+		String requestURI = attrs.getRequest().getRequestURI();
+		if ("DELETE".equals(attrs.getRequest().getMethod()) || requestURI.contains("/api/")) {
+			return this.owners.findById(ownerId).orElse(null);
+		}
+
+		return this.owners.findById(ownerId)
+			.orElseThrow(() -> new IllegalArgumentException("Owner not found with id: " + ownerId
+					+ ". Please ensure the ID is correct " + "and the owner exists in the database."));
 	}
 
 	@GetMapping("/owners/new")
@@ -116,6 +148,385 @@ class OwnerController {
 
 		// multiple owners found
 		return addPaginationModel(page, model, ownersResults);
+	}
+
+	/**
+	 * REST API endpoint to get a specific owner with their pets as JSON
+	 * @param ownerId the ID of the owner to retrieve
+	 * @return the owner with their pets
+	 */
+	@GetMapping("/api/owners/{ownerId}")
+	public @ResponseBody ResponseEntity<Owner> getOwnerWithPetsApi(@PathVariable("ownerId") int ownerId) {
+		Optional<Owner> optionalOwner = this.owners.findById(ownerId);
+		if (optionalOwner.isPresent()) {
+			Owner owner = optionalOwner.get();
+			return ResponseEntity.ok(owner);
+		}
+		return ResponseEntity.notFound().build();
+	}
+
+	/**
+	 * REST API endpoint to create a new owner with random pets (1-10 pets)
+	 * @param owner the owner to create (without pets)
+	 * @return the created owner with randomly generated pets
+	 */
+	@PostMapping("/api/owners/batch")
+	public @ResponseBody ResponseEntity<?> createOwnersBatchApi(@Valid @RequestBody List<Owner> owners,
+			BindingResult result) {
+		if (result.hasErrors()) {
+			return ResponseEntity.badRequest().body("Invalid owner data: " + result.getAllErrors());
+		}
+
+		List<Integer> createdIds = new ArrayList<>();
+		for (Owner owner : owners) {
+			// Generate random number of pets (1-3, optimized for memory)
+			int numberOfPets = random.nextInt(3) + 1;
+
+			// Get all available pet types
+			List<PetType> availableTypes = petTypes.findPetTypes();
+
+			// Create random pets for the owner (optimized for memory)
+			for (int i = 0; i < numberOfPets; i++) {
+				Pet pet = new Pet();
+				// Shortened pet name to reduce memory
+				pet.setName("P" + (i + 1) + "-" + owner.getLastName().charAt(0));
+
+				// Random birth date between 1-5 years ago (reduced range)
+				int yearsAgo = random.nextInt(5) + 1;
+				LocalDate birthDate = LocalDate.now().minusYears(yearsAgo).minusDays(random.nextInt(365));
+				pet.setBirthDate(birthDate);
+
+				// Random pet type
+				PetType randomType = availableTypes.get(random.nextInt(availableTypes.size()));
+				pet.setType(randomType);
+
+				// Clear visits to reduce memory (no visits needed for memory test)
+				pet.getVisits().clear();
+
+				// Add pet to owner
+				owner.addPet(pet);
+			}
+
+			Owner savedOwner = this.owners.save(owner);
+			createdIds.add(savedOwner.getId());
+		}
+
+		return ResponseEntity.ok(Map.of("createdIds", createdIds, "count", createdIds.size()));
+	}
+
+	@PostMapping("/api/owners/generate/{count}")
+	public @ResponseBody ResponseEntity<?> generateOwnersInMemory(@PathVariable int count) {
+		long startTime = System.currentTimeMillis();
+
+		// 使用多线程并行生成数据
+		int threadCount = Math.min(Runtime.getRuntime().availableProcessors(), 8);
+		int batchSize = count / threadCount;
+		List<CompletableFuture<Integer>> futures = new ArrayList<>();
+
+		// 创建随机数据生成器
+		String[] firstNames = { "张", "李", "王", "赵", "陈", "刘", "杨", "黄", "周", "吴" };
+		String[] lastNames = { "伟", "强", "军", "明", "刚", "健", "华", "建", "国", "庆" };
+		String[] cities = { "BJ", "SH", "GZ", "SZ", "HZ", "NJ", "SU", "WH", "CD", "CQ" };
+
+		for (int t = 0; t < threadCount; t++) {
+			int threadIndex = t;
+			CompletableFuture<Integer> future = CompletableFuture.supplyAsync(() -> {
+				int start = threadIndex * batchSize + 1;
+				int end = (threadIndex == threadCount - 1) ? count : (threadIndex + 1) * batchSize;
+				int created = 0;
+
+				Random random = new Random();
+				List<PetType> availableTypes = petTypes.findPetTypes();
+
+				for (int i = start; i <= end; i++) {
+					// 生成Owner
+					Owner owner = new Owner();
+					owner.setFirstName(firstNames[random.nextInt(firstNames.length)]);
+					owner.setLastName(lastNames[random.nextInt(lastNames.length)]);
+					owner.setAddress("Addr" + i);
+					owner.setCity(cities[random.nextInt(cities.length)]);
+					owner.setTelephone(String.valueOf(1000000000L + random.nextInt(900000000)));
+
+					// 生成随机宠物 (1-3个)
+					int petCount = random.nextInt(3) + 1;
+					for (int p = 0; p < petCount; p++) {
+						Pet pet = new Pet();
+						pet.setName("P" + (p + 1) + "-" + owner.getLastName().charAt(0));
+						pet.setBirthDate(
+								LocalDate.now().minusYears(random.nextInt(5) + 1).minusDays(random.nextInt(365)));
+						pet.setType(availableTypes.get(random.nextInt(availableTypes.size())));
+						// 清空visits以节省内存
+						pet.getVisits().clear();
+
+						owner.addPet(pet);
+					}
+
+					// 保存到内存存储
+					this.owners.save(owner);
+					created++;
+				}
+
+				return created;
+			});
+
+			futures.add(future);
+		}
+
+		// 等待所有线程完成
+		int totalCreated = futures.stream().mapToInt(future -> {
+			try {
+				return future.get();
+			}
+			catch (Exception e) {
+				throw new RuntimeException(e);
+			}
+		}).sum();
+
+		long endTime = System.currentTimeMillis();
+		double duration = (endTime - startTime) / 1000.0;
+		double speed = totalCreated / duration;
+
+		return ResponseEntity.ok(Map.of("totalCreated", totalCreated, "duration", String.format("%.2fs", duration),
+				"speed", String.format("%.0f owners/sec", speed), "memoryEstimate",
+				String.format("%.1f MB", totalCreated * 0.001) // 1KB per owner
+		));
+	}
+
+	@PostMapping("/api/owners/loadtest/{threads}/{duration}/{qpsLimit}")
+	public @ResponseBody ResponseEntity<?> runInMemoryLoadTest(@PathVariable int threads, @PathVariable int duration,
+			@PathVariable int qpsLimit) {
+		long startTime = System.nanoTime();
+
+		// 检查是否有数据
+		if (this.owners.findAll().isEmpty()) {
+			return ResponseEntity.badRequest()
+				.body(Map.of("error", "No data available. Please generate owners first."));
+		}
+
+		// 获取总用户数
+		int totalOwners = this.owners.findAll().size();
+
+		// 使用多线程进行负载测试
+		ExecutorService executor = Executors.newFixedThreadPool(threads);
+		List<CompletableFuture<LoadTestResult>> futures = new ArrayList<>();
+
+		// 记录每个线程的统计信息
+		for (int t = 0; t < threads; t++) {
+			CompletableFuture<LoadTestResult> future = CompletableFuture.supplyAsync(() -> {
+				return runSingleThreadLoadTest(totalOwners, duration, qpsLimit);
+			}, executor);
+			futures.add(future);
+		}
+
+		// 等待所有线程完成
+		long totalRequests = 0;
+		long totalErrors = 0;
+		long maxResponseTime = 0;
+		long minResponseTime = Long.MAX_VALUE;
+		long totalResponseTime = 0;
+
+		try {
+			for (CompletableFuture<LoadTestResult> future : futures) {
+				LoadTestResult result = future.get();
+				totalRequests += result.requests;
+				totalErrors += result.errors;
+				maxResponseTime = Math.max(maxResponseTime, result.maxResponseTime);
+				minResponseTime = Math.min(minResponseTime, result.minResponseTime);
+				totalResponseTime += result.totalResponseTime;
+			}
+		}
+		catch (Exception e) {
+			executor.shutdownNow();
+			return ResponseEntity.internalServerError().body(Map.of("error", "Load test failed: " + e.getMessage()));
+		}
+
+		executor.shutdown();
+
+		long endTime = System.nanoTime();
+		double actualDuration = (endTime - startTime) / 1_000_000_000.0;
+		double qps = totalRequests / actualDuration;
+
+		Map<String, Object> result = new HashMap<>();
+		result.put("totalRequests", totalRequests);
+		result.put("totalErrors", totalErrors);
+		result.put("successRate", String.format("%.2f%%", (totalRequests - totalErrors) * 100.0 / totalRequests));
+		result.put("qps", String.format("%.0f", qps));
+		result.put("qpsLimit", qpsLimit);
+		result.put("avgResponseTime",
+				totalRequests > 0 ? String.format("%.2f μs", totalResponseTime * 1.0 / totalRequests) : "0");
+		result.put("minResponseTime", String.format("%.2f μs", minResponseTime * 1.0));
+		result.put("maxResponseTime", String.format("%.2f μs", maxResponseTime * 1.0));
+		result.put("threads", threads);
+		result.put("duration", String.format("%.2fs", actualDuration));
+		result.put("dataSize", totalOwners + " owners");
+
+		return ResponseEntity.ok(result);
+	}
+
+	private static class LoadTestResult {
+
+		long requests = 0;
+
+		long errors = 0;
+
+		long maxResponseTime = 0;
+
+		long minResponseTime = Long.MAX_VALUE;
+
+		long totalResponseTime = 0;
+
+	}
+
+	private LoadTestResult runSingleThreadLoadTest(int totalOwners, int durationSeconds, int qpsLimit) {
+		LoadTestResult result = new LoadTestResult();
+		Random random = new Random();
+		long endTime = System.nanoTime() + (durationSeconds * 1_000_000_000L);
+
+		// QPS控制变量
+		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // 每次请求之间的最小间隔
+		long lastRequestTime = 0;
+
+		// 为了避免JVM过度优化，我们添加一些不可预测的操作
+		long dummyCounter = 0;
+
+		while (System.nanoTime() < endTime) {
+			// QPS控制：确保请求间隔不小于指定的最小间隔
+			if (qpsLimit > 0) {
+				long currentTime = System.nanoTime();
+				long timeSinceLastRequest = currentTime - lastRequestTime;
+				if (timeSinceLastRequest < intervalNanos) {
+					// 需要等待
+					long waitTime = intervalNanos - timeSinceLastRequest;
+					long waitUntil = currentTime + waitTime;
+					while (System.nanoTime() < waitUntil) {
+						// 忙等待 - 在高QPS场景下这不是问题，因为等待时间很短
+						Thread.yield();
+					}
+				}
+			}
+
+			int ownerId = random.nextInt(totalOwners) + 1; // 1-based ID
+
+			long requestStart = System.nanoTime();
+			try {
+				Owner owner = this.owners.findById(ownerId).orElse(null);
+				if (owner != null) {
+					// 执行更真实的计算操作来避免JVM优化
+					String firstName = owner.getFirstName();
+					String lastName = owner.getLastName();
+					String address = owner.getCity();
+
+					// 计算字符串hash值（有实际计算开销）
+					int hash = firstName.hashCode() + lastName.hashCode() + address.hashCode();
+					dummyCounter += hash; // 使用结果避免被优化掉
+
+					// 遍历宠物列表并进行计算
+					for (Pet pet : owner.getPets()) {
+						String petName = pet.getName();
+						String typeName = pet.getType().getName();
+						hash = petName.hashCode() + typeName.hashCode();
+						dummyCounter += hash;
+					}
+
+					// 添加一些随机计算来模拟业务逻辑
+					if ((dummyCounter & 0xFF) == 0) {
+						// 很少执行的分支，避免被优化
+						dummyCounter += Math.abs(ownerId);
+					}
+				}
+			}
+			catch (Exception e) {
+				result.errors++;
+			}
+			long requestEnd = System.nanoTime();
+
+			// 使用毫秒级计时来验证（更可靠但精度低）
+			long millisStart = System.currentTimeMillis();
+			// 重复执行多次来获得可测量的时间
+			for (int i = 0; i < 100; i++) {
+				Owner tempOwner = this.owners.findById(ownerId).orElse(null);
+				if (tempOwner != null) {
+					dummyCounter += tempOwner.getFirstName().hashCode();
+				}
+			}
+			long millisEnd = System.currentTimeMillis();
+
+			// 计算每次操作的时间（毫秒转微秒）
+			long responseTime = ((millisEnd - millisStart) * 1000) / 100; // 平均每次操作的微秒数
+			result.requests++;
+			result.maxResponseTime = Math.max(result.maxResponseTime, responseTime);
+			result.minResponseTime = Math.min(result.minResponseTime, responseTime);
+			result.totalResponseTime += responseTime;
+
+			// 更新最后请求时间
+			lastRequestTime = System.nanoTime();
+		}
+
+		// 打印dummyCounter来确保计算没有被优化掉
+		System.out.println("Thread completed with dummyCounter: " + dummyCounter);
+
+		return result;
+	}
+
+	@PostMapping("/api/owners")
+	public @ResponseBody ResponseEntity<?> createOwnerWithRandomPetsApi(@Valid @RequestBody Owner owner,
+			BindingResult result) {
+		if (result.hasErrors()) {
+			return ResponseEntity.badRequest().body("Invalid owner data: " + result.getAllErrors());
+		}
+
+		// Generate random number of pets (1-3, reduced for memory optimization)
+		int numberOfPets = random.nextInt(3) + 1;
+
+		// Get all available pet types
+		List<PetType> availableTypes = petTypes.findPetTypes();
+
+		// Create random pets for the owner (optimized for memory)
+		for (int i = 0; i < numberOfPets; i++) {
+			Pet pet = new Pet();
+			// Shortened pet name to reduce memory
+			pet.setName("P" + (i + 1) + "-" + owner.getLastName().charAt(0));
+
+			// Random birth date between 1-5 years ago (reduced range)
+			int yearsAgo = random.nextInt(5) + 1;
+			LocalDate birthDate = LocalDate.now().minusYears(yearsAgo).minusDays(random.nextInt(365));
+			pet.setBirthDate(birthDate);
+
+			// Random pet type
+			PetType randomType = availableTypes.get(random.nextInt(availableTypes.size()));
+			pet.setType(randomType);
+
+			// Clear visits to reduce memory (no visits needed for memory test)
+			pet.getVisits().clear();
+
+			// Add pet to owner
+			owner.addPet(pet);
+		}
+
+		Owner savedOwner = this.owners.save(owner);
+		return ResponseEntity.ok(savedOwner);
+	}
+
+	/**
+	 * REST API endpoint to delete an owner and all their pets
+	 * @param ownerId the ID of the owner to delete
+	 * @return response indicating success or failure
+	 */
+	@DeleteMapping("/api/owners/{ownerId}")
+	public ResponseEntity<Void> deleteOwnerAndPetsApi(@PathVariable("ownerId") int ownerId) {
+		try {
+			Optional<Owner> optionalOwner = this.owners.findById(ownerId);
+			if (optionalOwner.isPresent()) {
+				Owner owner = optionalOwner.get();
+				// Delete owner and all associated pets (cascade delete)
+				this.owners.delete(owner);
+				return ResponseEntity.noContent().build();
+			}
+			return ResponseEntity.notFound().build();
+		}
+		catch (Exception e) {
+			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+		}
 	}
 
 	private String addPaginationModel(int page, Model model, Page<Owner> paginated) {
@@ -171,6 +582,34 @@ class OwnerController {
 				"Owner not found with id: " + ownerId + ". Please ensure the ID is correct "));
 		mav.addObject(owner);
 		return mav;
+	}
+
+	/**
+	 * Handler for deleting an owner.
+	 * @param ownerId the ID of the owner to delete
+	 * @return ResponseEntity with HTTP status
+	 */
+	@DeleteMapping("/owners/{ownerId}")
+	public ResponseEntity<Void> deleteOwner(@PathVariable("ownerId") int ownerId) {
+		try {
+			Optional<Owner> optionalOwner = this.owners.findById(ownerId);
+			if (optionalOwner.isPresent()) {
+				// Load the owner with all associations to ensure cascade delete works
+				// properly
+				Owner owner = optionalOwner.get();
+				this.owners.delete(owner);
+				return ResponseEntity.noContent().build();
+			}
+			return ResponseEntity.notFound().build();
+		}
+		catch (DataIntegrityViolationException e) {
+			// Handle database constraint violations gracefully
+			return ResponseEntity.status(HttpStatus.CONFLICT).build();
+		}
+		catch (Exception e) {
+			// For other exceptions, return server error
+			return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+		}
 	}
 
 }
