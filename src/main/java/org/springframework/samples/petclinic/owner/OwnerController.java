@@ -686,32 +686,32 @@ class OwnerController {
 	private LoadTestResult runSingleThreadLoadTest(int totalOwners, int durationSeconds, int qpsLimit) {
 		LoadTestResult result = new LoadTestResult();
 		Random random = new Random();
-		long endTime = System.nanoTime() + (durationSeconds * 1_000_000_000L);
+		long testStartTime = System.nanoTime();
+		long endTime = testStartTime + (durationSeconds * 1_000_000_000L);
 
-		// QPS control variables
-		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // Minimum
-																			// interval
+		// QPS control variables - pre-calculate request intervals for precise timing
+		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // Interval
 																			// between
-																			// requests
-		long lastRequestTime = 0;
+																			// requests in
+																			// nanoseconds
+		int requestIndex = 0;
 
 		// To avoid JVM over-optimization, we add some unpredictable operations
 		long dummyCounter = 0;
 
 		while (System.nanoTime() < endTime) {
-			// QPS control: ensure request interval is not less than the specified minimum
+			// Calculate expected arrival time for this request: start_time + req_idx *
 			// interval
+			long expectedArrivalTime = testStartTime + (requestIndex * intervalNanos);
+
+			// Wait until the expected arrival time (if QPS control is enabled)
 			if (qpsLimit > 0) {
 				long currentTime = System.nanoTime();
-				long timeSinceLastRequest = currentTime - lastRequestTime;
-				if (timeSinceLastRequest < intervalNanos) {
-					// Need to wait
-					long waitTime = intervalNanos - timeSinceLastRequest;
-					long waitUntil = currentTime + waitTime;
-					while (System.nanoTime() < waitUntil) {
-						// Busy wait - this is not a problem in high QPS scenarios because
-						// wait time is very short
-						Thread.yield();
+				if (currentTime < expectedArrivalTime) {
+					// Wait until expected arrival time
+					while (System.nanoTime() < expectedArrivalTime) {
+						// Busy wait with yield for precise timing
+						// Thread.yield();
 					}
 				}
 			}
@@ -797,8 +797,8 @@ class OwnerController {
 				recordResponseTime(responseTime);
 			}
 
-			// Update last request time
-			lastRequestTime = System.nanoTime();
+			// Increment request index for next request timing
+			requestIndex++;
 		}
 
 		// Print dummyCounter to ensure calculations are not optimized away
@@ -810,32 +810,32 @@ class OwnerController {
 	private LoadTestResult runGetOnlySingleThreadLoadTest(int totalOwners, int durationSeconds, int qpsLimit) {
 		LoadTestResult result = new LoadTestResult();
 		Random random = new Random();
-		long endTime = System.nanoTime() + (durationSeconds * 1_000_000_000L);
+		long testStartTime = System.nanoTime();
+		long endTime = testStartTime + (durationSeconds * 1_000_000_000L);
 
-		// QPS control variables
-		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // Minimum
-																			// interval
+		// QPS control variables - pre-calculate request intervals for precise timing
+		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // Interval
 																			// between
-																			// requests
-		long lastRequestTime = 0;
+																			// requests in
+																			// nanoseconds
+		int requestIndex = 0;
 
 		// To avoid JVM over-optimization, we add some unpredictable operations
 		long dummyCounter = 0;
 
 		while (System.nanoTime() < endTime) {
-			// QPS control: ensure request interval is not less than the specified minimum
+			// Calculate expected arrival time for this request: start_time + req_idx *
 			// interval
+			long expectedArrivalTime = testStartTime + (requestIndex * intervalNanos);
+
+			// Wait until the expected arrival time (if QPS control is enabled)
 			if (qpsLimit > 0) {
 				long currentTime = System.nanoTime();
-				long timeSinceLastRequest = currentTime - lastRequestTime;
-				if (timeSinceLastRequest < intervalNanos) {
-					// Need to wait
-					long waitTime = intervalNanos - timeSinceLastRequest;
-					long waitUntil = currentTime + waitTime;
-					while (System.nanoTime() < waitUntil) {
-						// Busy wait - this is not a problem in high QPS scenarios because
-						// wait time is very short
-						Thread.yield();
+				if (currentTime < expectedArrivalTime) {
+					// Wait until expected arrival time
+					while (System.nanoTime() < expectedArrivalTime) {
+						// Busy wait with yield for precise timing
+						// Thread.yield();
 					}
 				}
 			}
@@ -885,7 +885,8 @@ class OwnerController {
 			result.minResponseTime = Math.min(result.minResponseTime, result.minResponseTime);
 			result.totalResponseTime += responseTime;
 
-			lastRequestTime = System.nanoTime();
+			// Increment request index for next request timing
+			requestIndex++;
 		}
 
 		return result;

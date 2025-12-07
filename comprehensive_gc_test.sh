@@ -59,7 +59,7 @@ mixed_workload_test() {
     PRE_MIXED_GC=$(grep -c "GC(" comprehensive_gc.log)
     
     START_TIME=$(date +%s)
-    MIXED_RESULT=$(curl -s -X POST 'http://localhost:8080/api/owners/loadtest/10/30/0' 2>/dev/null)
+    MIXED_RESULT=$(curl -s -X POST 'http://localhost:8080/api/owners/loadtest/10/30/100000' 2>/dev/null)
     END_TIME=$(date +%s)
     MIXED_DURATION=$((END_TIME - START_TIME))
     
