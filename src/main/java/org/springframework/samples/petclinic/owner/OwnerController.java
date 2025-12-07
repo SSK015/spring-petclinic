@@ -25,6 +25,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -78,13 +79,14 @@ class OwnerController {
 
 	private final Random random = new Random();
 
-	// Response time statistics for P95/P99 calculation
-	private final ConcurrentLinkedQueue<Long> responseTimes = new ConcurrentLinkedQueue<>();
+	// Thread-safe response time statistics for P95/P99 calculation
+	private final ConcurrentHashMap<Long, ConcurrentLinkedQueue<Long>> threadResponseTimes = new ConcurrentHashMap<>();
 
 	private final AtomicLong totalRequests = new AtomicLong(0);
 
-	private static final int MAX_SAMPLES = 100_000; // Keep last 100K samples to avoid
-													// memory issues
+	private static final int MAX_SAMPLES_PER_THREAD = 10_000; // Keep last 10K samples per
+																// thread to avoid memory
+																// issues
 
 	public OwnerController(OwnerRepository owners, PetTypeRepository petTypes) {
 		this.owners = owners;
@@ -149,36 +151,53 @@ class OwnerController {
 
 	}
 
-	// Record response time for statistics
+	// Record response time for statistics (thread-safe)
 	private void recordResponseTime(long responseTimeMicros) {
-		responseTimes.offer(responseTimeMicros);
+		long threadId = Thread.currentThread().getId();
+		ConcurrentLinkedQueue<Long> threadSamples = threadResponseTimes.computeIfAbsent(threadId,
+				k -> new ConcurrentLinkedQueue<>());
+		threadSamples.offer(responseTimeMicros);
 		totalRequests.incrementAndGet();
 
-		// Keep only the most recent samples to avoid memory issues
-		while (responseTimes.size() > MAX_SAMPLES) {
-			responseTimes.poll();
+		// Keep only the most recent samples per thread to avoid memory issues
+		while (threadSamples.size() > MAX_SAMPLES_PER_THREAD) {
+			threadSamples.poll();
 		}
 	}
 
-	// Calculate percentiles from collected response times
+	// Calculate percentiles from collected response times across all threads
 	private ResponseTimeStats calculateStats() {
-		List<Long> samples = new ArrayList<>(responseTimes);
-		if (samples.isEmpty()) {
+		List<Long> allSamples = new ArrayList<>();
+
+		// Collect samples from all threads
+		for (ConcurrentLinkedQueue<Long> threadSamples : threadResponseTimes.values()) {
+			if (threadSamples != null && !threadSamples.isEmpty()) {
+				allSamples.addAll(threadSamples);
+			}
+		}
+
+		if (allSamples.isEmpty()) {
 			return new ResponseTimeStats(0, 0, 0, 0, 0, 0, 0.0);
 		}
 
-		Collections.sort(samples);
-		int n = samples.size();
+		Collections.sort(allSamples);
+		int n = allSamples.size();
 
-		long min = samples.get(0);
-		long max = samples.get(n - 1);
-		long p50 = getPercentile(samples, 50);
-		long p95 = getPercentile(samples, 95);
-		long p99 = getPercentile(samples, 99);
+		long min = allSamples.get(0);
+		long max = allSamples.get(n - 1);
+		long p50 = getPercentile(allSamples, 50);
+		long p95 = getPercentile(allSamples, 95);
+		long p99 = getPercentile(allSamples, 99);
 
-		double avg = samples.stream().mapToLong(Long::longValue).average().orElse(0.0);
+		double avg = allSamples.stream().mapToLong(Long::longValue).average().orElse(0.0);
 
 		return new ResponseTimeStats(totalRequests.get(), p50, p95, p99, min, max, avg);
+	}
+
+	// Clear all collected response time statistics
+	private void clearResponseTimeStats() {
+		threadResponseTimes.clear();
+		totalRequests.set(0);
 	}
 
 	// Get percentile value from sorted list
@@ -281,6 +300,16 @@ class OwnerController {
 			recordResponseTime(responseTime);
 			throw e;
 		}
+	}
+
+	/**
+	 * API endpoint to clear response time statistics
+	 * @return confirmation message
+	 */
+	@PostMapping("/api/owners/stats/clear")
+	public @ResponseBody ResponseEntity<String> clearResponseTimeStatsApi() {
+		clearResponseTimeStats();
+		return ResponseEntity.ok("Response time statistics cleared");
 	}
 
 	@GetMapping("/owners/find")
@@ -560,6 +589,9 @@ class OwnerController {
 		result.put("dataSize", totalOwners + " owners");
 		result.put("testType", "GET Only");
 
+		// Note: Keep response time stats for final analysis - they will accumulate across
+		// tests
+
 		return ResponseEntity.ok(result);
 	}
 
@@ -631,6 +663,9 @@ class OwnerController {
 		result.put("duration", String.format("%.2fs", actualDuration));
 		result.put("dataSize", totalOwners + " owners");
 
+		// Note: Keep response time stats for final analysis - they will accumulate across
+		// tests
+
 		return ResponseEntity.ok(result);
 	}
 
@@ -654,14 +689,18 @@ class OwnerController {
 		long endTime = System.nanoTime() + (durationSeconds * 1_000_000_000L);
 
 		// QPS control variables
-		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // Minimum interval between requests
+		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // Minimum
+																			// interval
+																			// between
+																			// requests
 		long lastRequestTime = 0;
 
 		// To avoid JVM over-optimization, we add some unpredictable operations
 		long dummyCounter = 0;
 
 		while (System.nanoTime() < endTime) {
-			// QPS control: ensure request interval is not less than the specified minimum interval
+			// QPS control: ensure request interval is not less than the specified minimum
+			// interval
 			if (qpsLimit > 0) {
 				long currentTime = System.nanoTime();
 				long timeSinceLastRequest = currentTime - lastRequestTime;
@@ -670,7 +709,8 @@ class OwnerController {
 					long waitTime = intervalNanos - timeSinceLastRequest;
 					long waitUntil = currentTime + waitTime;
 					while (System.nanoTime() < waitUntil) {
-						// Busy wait - this is not a problem in high QPS scenarios because wait time is very short
+						// Busy wait - this is not a problem in high QPS scenarios because
+						// wait time is very short
 						Thread.yield();
 					}
 				}
@@ -687,7 +727,8 @@ class OwnerController {
 					int ownerId = random.nextInt(totalOwners) + 1; // 1-based ID
 					Owner owner = this.owners.findById(ownerId).orElse(null);
 					if (owner != null) {
-						// Perform more realistic computation operations to avoid JVM optimization
+						// Perform more realistic computation operations to avoid JVM
+						// optimization
 						String firstName = owner.getFirstName();
 						String lastName = owner.getLastName();
 						String address = owner.getCity();
@@ -744,11 +785,17 @@ class OwnerController {
 			long requestEnd = System.nanoTime();
 
 			// Calculate response time (microseconds)
-			long responseTime = (requestEnd - requestStart) / 1000; // Convert nanoseconds to microseconds
+			long responseTime = (requestEnd - requestStart) / 1000; // Convert nanoseconds
+																	// to microseconds
 			result.requests++;
 			result.maxResponseTime = Math.max(result.maxResponseTime, responseTime);
 			result.minResponseTime = Math.min(result.minResponseTime, responseTime);
 			result.totalResponseTime += responseTime;
+
+			// Sample 1% of requests for detailed statistics
+			if (random.nextInt(100) < 1) {
+				recordResponseTime(responseTime);
+			}
 
 			// Update last request time
 			lastRequestTime = System.nanoTime();
@@ -766,14 +813,18 @@ class OwnerController {
 		long endTime = System.nanoTime() + (durationSeconds * 1_000_000_000L);
 
 		// QPS control variables
-		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // Minimum interval between requests
+		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // Minimum
+																			// interval
+																			// between
+																			// requests
 		long lastRequestTime = 0;
 
 		// To avoid JVM over-optimization, we add some unpredictable operations
 		long dummyCounter = 0;
 
 		while (System.nanoTime() < endTime) {
-			// QPS control: ensure request interval is not less than the specified minimum interval
+			// QPS control: ensure request interval is not less than the specified minimum
+			// interval
 			if (qpsLimit > 0) {
 				long currentTime = System.nanoTime();
 				long timeSinceLastRequest = currentTime - lastRequestTime;
@@ -782,7 +833,8 @@ class OwnerController {
 					long waitTime = intervalNanos - timeSinceLastRequest;
 					long waitUntil = currentTime + waitTime;
 					while (System.nanoTime() < waitUntil) {
-						// Busy wait - this is not a problem in high QPS scenarios because wait time is very short
+						// Busy wait - this is not a problem in high QPS scenarios because
+						// wait time is very short
 						Thread.yield();
 					}
 				}
@@ -795,7 +847,8 @@ class OwnerController {
 				int ownerId = random.nextInt(totalOwners) + 1; // 1-based ID
 				Owner owner = this.owners.findById(ownerId).orElse(null);
 				if (owner != null) {
-					// Perform more realistic computation operations to avoid JVM optimization
+					// Perform more realistic computation operations to avoid JVM
+					// optimization
 					String firstName = owner.getFirstName();
 					String lastName = owner.getLastName();
 					String address = owner.getCity();
@@ -825,7 +878,8 @@ class OwnerController {
 			long requestEnd = System.nanoTime();
 
 			// Calculate response time (microseconds)
-			long responseTime = (requestEnd - requestStart) / 1000; // Convert nanoseconds to microseconds
+			long responseTime = (requestEnd - requestStart) / 1000; // Convert nanoseconds
+																	// to microseconds
 			result.requests++;
 			result.maxResponseTime = Math.max(result.maxResponseTime, responseTime);
 			result.minResponseTime = Math.min(result.minResponseTime, result.minResponseTime);

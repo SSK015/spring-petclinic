@@ -16,8 +16,8 @@ trap cleanup EXIT
 # Start application
 start_app() {
     echo "🚀 Step 1: Starting Spring PetClinic application"
-    echo "JVM parameters: -Xmx8g -Xms2g -XX:+PrintGC -XX:+PrintGCDetails"
-    java -Xmx8g -Xms2g -XX:+PrintGC -XX:+PrintGCDetails -jar target/spring-petclinic-*.jar > comprehensive_gc.log 2>&1 &
+    echo "JVM parameters: -Xmx32g -Xms2g -XX:+PrintGC -XX:+PrintGCDetails"
+    java -Xmx32g -Xms2g -XX:+PrintGC -XX:+PrintGCDetails -jar target/spring-petclinic-*.jar > comprehensive_gc.log 2>&1 &
     APP_PID=$!
     
     echo "Waiting for application to start..."
@@ -35,9 +35,9 @@ start_app() {
 # Load test data
 load_data() {
     echo ""
-    echo "📊 Step 2: Loading test data (1 million users)"
+    echo "📊 Step 2: Loading test data (10 million users)"
     START_TIME=$(date +%s)
-    curl -s -X POST 'http://localhost:8080/api/owners/generate/1000000' > /dev/null 2>&1
+    curl -s -X POST 'http://localhost:8080/api/owners/generate/10000000' > /dev/null 2>&1
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
     echo "✅ Data loading completed (duration: ${DURATION} seconds)"
@@ -84,7 +84,7 @@ get_only_test() {
     PRE_GET_GC=$(grep -c "GC(" comprehensive_gc.log)
     
     START_TIME=$(date +%s)
-    GET_RESULT=$(curl -s -X POST 'http://localhost:8080/api/owners/getloadtest/10/30/0' 2>/dev/null)
+    GET_RESULT=$(curl -s -X POST 'http://localhost:8080/api/owners/getloadtest/10/3/0' 2>/dev/null)
     END_TIME=$(date +%s)
     GET_DURATION=$((END_TIME - START_TIME))
     
@@ -170,10 +170,15 @@ main() {
     start_app
     load_data
     mixed_workload_test
-    get_only_test
+get_only_test
     analyze_stats
     analyze_gc
     
+    # Clean up statistics data
+    echo ""
+    echo "🧹 Cleaning up test data..."
+    curl -s -X POST 'http://localhost:8080/api/owners/stats/clear' > /dev/null 2>&1
+
     echo ""
     echo "🎉 Comprehensive test completed!"
     echo "================="
