@@ -114,7 +114,7 @@
           </hashTree>
         </hashTree>
         
-         <!-- 10% DELETE Requests (模拟删除 ID 1-100 之间的随机 Owner) -->
+         <!-- 10% DELETE Requests (simulate deleting random Owner with ID between 1-100) -->
         <ThroughputController guiclass="ThroughputControllerGui" testclass="ThroughputController" testname="DELETE Controller (10%)">
           <intProp name="ThroughputController.style">1</intProp>
           <boolProp name="ThroughputController.perThread">false</boolProp>

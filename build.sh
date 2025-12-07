@@ -1,22 +1,22 @@
 #!/bin/bash
-echo "🔨 构建Spring PetClinic (跳过所有检查)"
+echo "🔨 Building Spring PetClinic (skipping all checks)"
 echo "====================================="
 
-# 构建参数 - 跳过所有可能导致失败的检查
+# Build parameters - skip all checks that might cause failure
 BUILD_OPTS="-DskipTests -Dcheckstyle.skip=true -Dnohttp-checkstyle.skip=true"
 
-echo "📋 构建参数: $BUILD_OPTS"
-echo "🏗️  开始构建..."
+echo "📋 Build parameters: $BUILD_OPTS"
+echo "🏗️  Starting build..."
 
 if ./mvnw clean package $BUILD_OPTS; then
     echo ""
-    echo "✅ 构建成功!"
-    echo "📦 JAR文件: target/spring-petclinic-*.jar"
+    echo "✅ Build successful!"
+    echo "📦 JAR file: target/spring-petclinic-*.jar"
     echo ""
-    echo "🚀 启动命令:"
+    echo "🚀 Start command:"
     echo "java -jar target/spring-petclinic-*.jar"
 else
     echo ""
-    echo "❌ 构建失败!"
+    echo "❌ Build failed!"
     exit 1
 fi

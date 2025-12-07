@@ -416,12 +416,12 @@ class OwnerController {
 					String.format("%.2fs", (endTime - startTime) / 1000.0), "speed", "N/A", "memoryEstimate", "0 MB"));
 		}
 
-		// 使用多线程并行生成数据
+		// Use multithreading to generate data in parallel
 		int threadCount = Math.min(Runtime.getRuntime().availableProcessors(), 8);
 		int batchSize = count / threadCount;
 		List<CompletableFuture<Integer>> futures = new ArrayList<>();
 
-		// 创建随机数据生成器
+		// Create random data generator
 		String[] firstNames = { "张", "李", "王", "赵", "陈", "刘", "杨", "黄", "周", "吴" };
 		String[] lastNames = { "伟", "强", "军", "明", "刚", "健", "华", "建", "国", "庆" };
 		String[] cities = { "BJ", "SH", "GZ", "SZ", "HZ", "NJ", "SU", "WH", "CD", "CQ" };
@@ -437,7 +437,7 @@ class OwnerController {
 				List<PetType> availableTypes = petTypes.findPetTypes();
 
 				for (int i = start; i <= end; i++) {
-					// 生成Owner
+					// Generate Owner
 					Owner owner = new Owner();
 					owner.setFirstName(firstNames[random.nextInt(firstNames.length)]);
 					owner.setLastName(lastNames[random.nextInt(lastNames.length)]);
@@ -445,7 +445,7 @@ class OwnerController {
 					owner.setCity(cities[random.nextInt(cities.length)]);
 					owner.setTelephone(String.valueOf(1000000000L + random.nextInt(900000000)));
 
-					// 生成随机宠物 (1-3个)
+					// Generate random pets (1-3)
 					int petCount = random.nextInt(3) + 1;
 					for (int p = 0; p < petCount; p++) {
 						Pet pet = new Pet();
@@ -453,13 +453,13 @@ class OwnerController {
 						pet.setBirthDate(
 								LocalDate.now().minusYears(random.nextInt(5) + 1).minusDays(random.nextInt(365)));
 						pet.setType(availableTypes.get(random.nextInt(availableTypes.size())));
-						// 清空visits以节省内存
+						// Clear visits to save memory
 						pet.getVisits().clear();
 
 						owner.addPet(pet);
 					}
 
-					// 保存到内存存储
+					// Save to memory storage
 					this.owners.save(owner);
 					created++;
 				}
@@ -470,7 +470,7 @@ class OwnerController {
 			futures.add(future);
 		}
 
-		// 等待所有线程完成
+		// Wait for all threads to complete
 		int totalCreated = futures.stream().mapToInt(future -> {
 			try {
 				return future.get();
@@ -495,20 +495,20 @@ class OwnerController {
 			@PathVariable int qpsLimit) {
 		long startTime = System.nanoTime();
 
-		// 检查是否有数据
+		// Check if there is data
 		if (this.owners.findAll().isEmpty()) {
 			return ResponseEntity.badRequest()
 				.body(Map.of("error", "No data available. Please generate owners first."));
 		}
 
-		// 获取总用户数
+		// Get total number of users
 		int totalOwners = this.owners.findAll().size();
 
-		// 使用多线程进行纯GET负载测试
+		// Use multithreading for pure GET load testing
 		ExecutorService executor = Executors.newFixedThreadPool(threads);
 		List<CompletableFuture<LoadTestResult>> futures = new ArrayList<>();
 
-		// 记录每个线程的统计信息
+		// Record statistics for each thread
 		for (int t = 0; t < threads; t++) {
 			CompletableFuture<LoadTestResult> future = CompletableFuture.supplyAsync(() -> {
 				return runGetOnlySingleThreadLoadTest(totalOwners, duration, qpsLimit);
@@ -516,7 +516,7 @@ class OwnerController {
 			futures.add(future);
 		}
 
-		// 等待所有线程完成
+		// Wait for all threads to complete
 		long totalRequests = 0;
 		long totalErrors = 0;
 		long maxResponseTime = 0;
@@ -568,20 +568,20 @@ class OwnerController {
 			@PathVariable int qpsLimit) {
 		long startTime = System.nanoTime();
 
-		// 检查是否有数据
+		// Check if there is data
 		if (this.owners.findAll().isEmpty()) {
 			return ResponseEntity.badRequest()
 				.body(Map.of("error", "No data available. Please generate owners first."));
 		}
 
-		// 获取总用户数
+		// Get total number of users
 		int totalOwners = this.owners.findAll().size();
 
-		// 使用多线程进行负载测试
+		// Use multithreading for load testing
 		ExecutorService executor = Executors.newFixedThreadPool(threads);
 		List<CompletableFuture<LoadTestResult>> futures = new ArrayList<>();
 
-		// 记录每个线程的统计信息
+		// Record statistics for each thread
 		for (int t = 0; t < threads; t++) {
 			CompletableFuture<LoadTestResult> future = CompletableFuture.supplyAsync(() -> {
 				return runSingleThreadLoadTest(totalOwners, duration, qpsLimit);
@@ -589,7 +589,7 @@ class OwnerController {
 			futures.add(future);
 		}
 
-		// 等待所有线程完成
+		// Wait for all threads to complete
 		long totalRequests = 0;
 		long totalErrors = 0;
 		long maxResponseTime = 0;
@@ -653,24 +653,24 @@ class OwnerController {
 		Random random = new Random();
 		long endTime = System.nanoTime() + (durationSeconds * 1_000_000_000L);
 
-		// QPS控制变量
-		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // 每次请求之间的最小间隔
+		// QPS control variables
+		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // Minimum interval between requests
 		long lastRequestTime = 0;
 
-		// 为了避免JVM过度优化，我们添加一些不可预测的操作
+		// To avoid JVM over-optimization, we add some unpredictable operations
 		long dummyCounter = 0;
 
 		while (System.nanoTime() < endTime) {
-			// QPS控制：确保请求间隔不小于指定的最小间隔
+			// QPS control: ensure request interval is not less than the specified minimum interval
 			if (qpsLimit > 0) {
 				long currentTime = System.nanoTime();
 				long timeSinceLastRequest = currentTime - lastRequestTime;
 				if (timeSinceLastRequest < intervalNanos) {
-					// 需要等待
+					// Need to wait
 					long waitTime = intervalNanos - timeSinceLastRequest;
 					long waitUntil = currentTime + waitTime;
 					while (System.nanoTime() < waitUntil) {
-						// 忙等待 - 在高QPS场景下这不是问题，因为等待时间很短
+						// Busy wait - this is not a problem in high QPS scenarios because wait time is very short
 						Thread.yield();
 					}
 				}
@@ -679,24 +679,24 @@ class OwnerController {
 			long requestStart = System.nanoTime();
 
 			try {
-				// 70% GET, 15% POST (INSERT), 15% DELETE - 模拟混合负载
+				// 70% GET, 15% POST (INSERT), 15% DELETE - simulate mixed workload
 				int operationType = random.nextInt(100);
 
 				if (operationType < 70) {
-					// GET操作
+					// GET operation
 					int ownerId = random.nextInt(totalOwners) + 1; // 1-based ID
 					Owner owner = this.owners.findById(ownerId).orElse(null);
 					if (owner != null) {
-						// 执行更真实的计算操作来避免JVM优化
+						// Perform more realistic computation operations to avoid JVM optimization
 						String firstName = owner.getFirstName();
 						String lastName = owner.getLastName();
 						String address = owner.getCity();
 
-						// 计算字符串hash值（有实际计算开销）
+						// Calculate string hash values (with actual computation overhead)
 						int hash = firstName.hashCode() + lastName.hashCode() + address.hashCode();
-						dummyCounter += hash; // 使用结果避免被优化掉
+						dummyCounter += hash; // Use result to avoid being optimized away
 
-						// 遍历宠物列表并进行计算
+						// Iterate through pet list and perform calculations
 						for (Pet pet : owner.getPets()) {
 							String petName = pet.getName();
 							String typeName = pet.getType().getName();
@@ -704,15 +704,15 @@ class OwnerController {
 							dummyCounter += hash;
 						}
 
-						// 添加一些随机计算来模拟业务逻辑
+						// Add some random calculations to simulate business logic
 						if ((dummyCounter & 0xFF) == 0) {
-							// 很少执行的分支，避免被优化
+							// Rarely executed branch, avoid being optimized
 							dummyCounter += Math.abs(ownerId);
 						}
 					}
 				}
 				else if (operationType < 85) {
-					// POST操作 (INSERT) - 创建新用户
+					// POST operation (INSERT) - create new user
 					Owner newOwner = new Owner();
 					newOwner.setFirstName("LoadTest" + random.nextInt(1000000));
 					newOwner.setLastName("User");
@@ -721,20 +721,20 @@ class OwnerController {
 					newOwner.setTelephone(String.valueOf(1000000000L + random.nextInt(900000000)));
 
 					this.owners.save(newOwner);
-					dummyCounter += newOwner.getId(); // 使用ID避免优化
+					dummyCounter += newOwner.getId(); // Use ID to avoid optimization
 				}
 				else {
-					// DELETE操作 - 删除随机用户
+					// DELETE operation - delete random user
 					int ownerId = random.nextInt(totalOwners) + 1; // 1-based ID
 					try {
 						Owner ownerToDelete = this.owners.findById(ownerId).orElse(null);
 						if (ownerToDelete != null) {
 							this.owners.delete(ownerToDelete);
-							dummyCounter += ownerId; // 使用ID避免优化
+							dummyCounter += ownerId; // Use ID to avoid optimization
 						}
 					}
 					catch (Exception e) {
-						// 删除不存在的用户，忽略错误
+						// Delete non-existent user, ignore error
 					}
 				}
 			}
@@ -743,18 +743,18 @@ class OwnerController {
 			}
 			long requestEnd = System.nanoTime();
 
-			// 计算响应时间（微秒）
-			long responseTime = (requestEnd - requestStart) / 1000; // 纳秒转微秒
+			// Calculate response time (microseconds)
+			long responseTime = (requestEnd - requestStart) / 1000; // Convert nanoseconds to microseconds
 			result.requests++;
 			result.maxResponseTime = Math.max(result.maxResponseTime, responseTime);
 			result.minResponseTime = Math.min(result.minResponseTime, responseTime);
 			result.totalResponseTime += responseTime;
 
-			// 更新最后请求时间
+			// Update last request time
 			lastRequestTime = System.nanoTime();
 		}
 
-		// 打印dummyCounter来确保计算没有被优化掉
+		// Print dummyCounter to ensure calculations are not optimized away
 		System.out.println("Thread completed with dummyCounter: " + dummyCounter);
 
 		return result;
@@ -765,24 +765,24 @@ class OwnerController {
 		Random random = new Random();
 		long endTime = System.nanoTime() + (durationSeconds * 1_000_000_000L);
 
-		// QPS控制变量
-		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // 每次请求之间的最小间隔
+		// QPS control variables
+		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // Minimum interval between requests
 		long lastRequestTime = 0;
 
-		// 为了避免JVM过度优化，我们添加一些不可预测的操作
+		// To avoid JVM over-optimization, we add some unpredictable operations
 		long dummyCounter = 0;
 
 		while (System.nanoTime() < endTime) {
-			// QPS控制：确保请求间隔不小于指定的最小间隔
+			// QPS control: ensure request interval is not less than the specified minimum interval
 			if (qpsLimit > 0) {
 				long currentTime = System.nanoTime();
 				long timeSinceLastRequest = currentTime - lastRequestTime;
 				if (timeSinceLastRequest < intervalNanos) {
-					// 需要等待
+					// Need to wait
 					long waitTime = intervalNanos - timeSinceLastRequest;
 					long waitUntil = currentTime + waitTime;
 					while (System.nanoTime() < waitUntil) {
-						// 忙等待 - 在高QPS场景下这不是问题，因为等待时间很短
+						// Busy wait - this is not a problem in high QPS scenarios because wait time is very short
 						Thread.yield();
 					}
 				}
@@ -791,20 +791,20 @@ class OwnerController {
 			long requestStart = System.nanoTime();
 
 			try {
-				// 纯GET操作 - 模拟读取负载
+				// Pure GET operation - simulate read workload
 				int ownerId = random.nextInt(totalOwners) + 1; // 1-based ID
 				Owner owner = this.owners.findById(ownerId).orElse(null);
 				if (owner != null) {
-					// 执行更真实的计算操作来避免JVM优化
+					// Perform more realistic computation operations to avoid JVM optimization
 					String firstName = owner.getFirstName();
 					String lastName = owner.getLastName();
 					String address = owner.getCity();
 
-					// 计算字符串hash值（有实际计算开销）
+					// Calculate string hash values (with actual computation overhead)
 					int hash = firstName.hashCode() + lastName.hashCode() + address.hashCode();
-					dummyCounter += hash; // 使用结果避免被优化掉
+					dummyCounter += hash; // Use result to avoid being optimized away
 
-					// 遍历宠物列表并进行计算
+					// Iterate through pet list and perform calculations
 					for (Pet pet : owner.getPets()) {
 						String petName = pet.getName();
 						String typeName = pet.getType().getName();
@@ -812,9 +812,9 @@ class OwnerController {
 						dummyCounter += hash;
 					}
 
-					// 添加一些随机计算来模拟业务逻辑
+					// Add some random calculations to simulate business logic
 					if ((dummyCounter & 0xFF) == 0) {
-						// 很少执行的分支，避免被优化
+						// Rarely executed branch, avoid being optimized
 						dummyCounter += Math.abs(ownerId);
 					}
 				}
@@ -824,8 +824,8 @@ class OwnerController {
 			}
 			long requestEnd = System.nanoTime();
 
-			// 计算响应时间（微秒）
-			long responseTime = (requestEnd - requestStart) / 1000; // 纳秒转微秒
+			// Calculate response time (microseconds)
+			long responseTime = (requestEnd - requestStart) / 1000; // Convert nanoseconds to microseconds
 			result.requests++;
 			result.maxResponseTime = Math.max(result.maxResponseTime, responseTime);
 			result.minResponseTime = Math.min(result.minResponseTime, result.minResponseTime);

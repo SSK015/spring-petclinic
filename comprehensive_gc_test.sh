@@ -1,60 +1,60 @@
 #!/bin/bash
-echo "🎯 综合GC影响测试脚本"
+echo "🎯 Comprehensive GC Impact Test Script"
 echo "===================="
-echo "包含：启动 → 加载数据 → 混合负载 → 纯GET测试 → 统计分析 → GC分析"
+echo "Includes: Start → Load Data → Mixed Workload → Pure GET Test → Statistical Analysis → GC Analysis"
 echo ""
 
-# 清理环境
+# Clean up environment
 cleanup() {
     echo ""
-    echo "🧹 清理环境..."
+    echo "🧹 Cleaning up environment..."
     pkill -f spring-petclinic 2>/dev/null || true
     sleep 2
 }
 trap cleanup EXIT
 
-# 启动应用
+# Start application
 start_app() {
-    echo "🚀 步骤1: 启动Spring PetClinic应用"
-    echo "JVM参数: -Xmx8g -Xms2g -XX:+PrintGC -XX:+PrintGCDetails"
+    echo "🚀 Step 1: Starting Spring PetClinic application"
+    echo "JVM parameters: -Xmx8g -Xms2g -XX:+PrintGC -XX:+PrintGCDetails"
     java -Xmx8g -Xms2g -XX:+PrintGC -XX:+PrintGCDetails -jar target/spring-petclinic-*.jar > comprehensive_gc.log 2>&1 &
     APP_PID=$!
     
-    echo "等待应用启动..."
+    echo "Waiting for application to start..."
     for i in {1..30}; do
         if curl -s http://localhost:8080/actuator/health > /dev/null 2>&1; then
-            echo "✅ 应用启动成功 (PID: $APP_PID)"
+            echo "✅ Application started successfully (PID: $APP_PID)"
             return 0
         fi
         sleep 1
     done
-    echo "❌ 应用启动失败"
+    echo "❌ Application startup failed"
     exit 1
 }
 
-# 加载测试数据
+# Load test data
 load_data() {
     echo ""
-    echo "📊 步骤2: 加载测试数据 (100万个用户)"
+    echo "📊 Step 2: Loading test data (1 million users)"
     START_TIME=$(date +%s)
     curl -s -X POST 'http://localhost:8080/api/owners/generate/1000000' > /dev/null 2>&1
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
-    echo "✅ 数据加载完成 (耗时: ${DURATION}秒)"
+    echo "✅ Data loading completed (duration: ${DURATION} seconds)"
     
-    # 记录加载后的统计
+    # Record statistics after loading
     INITIAL_STATS=$(curl -s http://localhost:8080/api/owners/stats 2>/dev/null || echo '{"totalRequests":0}')
     INITIAL_GC=$(grep -c "GC(" comprehensive_gc.log)
-    echo "📈 初始状态 - GC次数: $INITIAL_GC"
+    echo "📈 Initial state - GC count: $INITIAL_GC"
 }
 
-# 混合负载测试
+# Mixed workload test
 mixed_workload_test() {
     echo ""
-    echo "🔄 步骤3: 混合负载测试 (70% GET + 15% INSERT + 15% DELETE)"
-    echo "测试参数: 10线程 × 30秒"
+    echo "🔄 Step 3: Mixed workload test (70% GET + 15% INSERT + 15% DELETE)"
+    echo "Test parameters: 10 threads × 30 seconds"
     
-    # 记录测试开始前的统计
+    # Record statistics before test starts
     PRE_MIXED_STATS=$(curl -s http://localhost:8080/api/owners/stats 2>/dev/null || echo '{"totalRequests":0}')
     PRE_MIXED_GC=$(grep -c "GC(" comprehensive_gc.log)
     
@@ -63,23 +63,23 @@ mixed_workload_test() {
     END_TIME=$(date +%s)
     MIXED_DURATION=$((END_TIME - START_TIME))
     
-    # 记录测试后的统计
+    # Record statistics after test
     POST_MIXED_STATS=$(curl -s http://localhost:8080/api/owners/stats 2>/dev/null || echo '{"totalRequests":0}')
     POST_MIXED_GC=$(grep -c "GC(" comprehensive_gc.log)
     MIXED_GC_INCREASE=$((POST_MIXED_GC - PRE_MIXED_GC))
     
-    echo "✅ 混合负载完成 (耗时: ${MIXED_DURATION}秒)"
-    echo "📊 混合负载结果: $MIXED_RESULT"
-    echo "📈 混合负载期间GC增量: $MIXED_GC_INCREASE 次"
+    echo "✅ Mixed workload completed (duration: ${MIXED_DURATION} seconds)"
+    echo "📊 Mixed workload results: $MIXED_RESULT"
+    echo "📈 GC increase during mixed workload: $MIXED_GC_INCREASE times"
 }
 
-# 纯GET性能测试
+# Pure GET performance test
 get_only_test() {
     echo ""
-    echo "⚡ 步骤4: 纯GET性能测试 (100% GET请求)"
-    echo "测试参数: 10线程 × 30秒"
+    echo "⚡ Step 4: Pure GET performance test (100% GET requests)"
+    echo "Test parameters: 10 threads × 30 seconds"
     
-    # 记录测试开始前的统计
+    # Record statistics before test starts
     PRE_GET_STATS=$(curl -s http://localhost:8080/api/owners/stats 2>/dev/null || echo '{"totalRequests":0}')
     PRE_GET_GC=$(grep -c "GC(" comprehensive_gc.log)
     
@@ -88,25 +88,25 @@ get_only_test() {
     END_TIME=$(date +%s)
     GET_DURATION=$((END_TIME - START_TIME))
     
-    # 记录测试后的统计
+    # Record statistics after test
     POST_GET_STATS=$(curl -s http://localhost:8080/api/owners/stats 2>/dev/null || echo '{"totalRequests":0}')
     POST_GET_GC=$(grep -c "GC(" comprehensive_gc.log)
     GET_GC_INCREASE=$((POST_GET_GC - PRE_GET_GC))
     
-    echo "✅ 纯GET测试完成 (耗时: ${GET_DURATION}秒, 10线程×30秒)"
-    echo "📊 纯GET负载结果: $GET_RESULT"
-    echo "📈 纯GET期间GC增量: $GET_GC_INCREASE 次"
+    echo "✅ Pure GET test completed (duration: ${GET_DURATION} seconds, 10 threads×30 seconds)"
+    echo "📊 Pure GET workload results: $GET_RESULT"
+    echo "📈 GC increase during pure GET: $GET_GC_INCREASE times"
 }
 
-# 统计分析
+# Statistical analysis
 analyze_stats() {
     echo ""
-    echo "📊 步骤5: 性能统计分析"
+    echo "📊 Step 5: Performance statistical analysis"
     echo "======================"
     
     FINAL_STATS=$(curl -s http://localhost:8080/api/owners/stats 2>/dev/null || echo '{"totalRequests":0,"p50":0,"p95":0,"p99":0,"min":0,"max":0,"avg":0}')
     
-    # 解析JSON数据 (简单版本，使用grep和cut)
+    # Parse JSON data (simple version, using grep and cut)
     TOTAL_REQUESTS=$(echo "$FINAL_STATS" | grep -o '"totalRequests":[0-9]*' | cut -d':' -f2)
     P50=$(echo "$FINAL_STATS" | grep -o '"p50":[0-9]*' | cut -d':' -f2)
     P95=$(echo "$FINAL_STATS" | grep -o '"p95":[0-9]*' | cut -d':' -f2)
@@ -115,20 +115,20 @@ analyze_stats() {
     MAX=$(echo "$FINAL_STATS" | grep -o '"max":[0-9]*' | cut -d':' -f2)
     AVG=$(echo "$FINAL_STATS" | grep -o '"avg":[0-9.]*' | cut -d':' -f2)
     
-    echo "🎯 最终响应时间统计 (微秒):"
-    echo "• 总请求数: $TOTAL_REQUESTS"
-    echo "• P50 (中位数): ${P50}μs"
-    echo "• P95: ${P95}μs"  
+    echo "🎯 Final response time statistics (microseconds):"
+    echo "• Total requests: $TOTAL_REQUESTS"
+    echo "• P50 (median): ${P50}μs"
+    echo "• P95: ${P95}μs"
     echo "• P99: ${P99}μs"
-    echo "• 最小响应时间: ${MIN}μs"
-    echo "• 最大响应时间: ${MAX}μs"
-    echo "• 平均响应时间: ${AVG}μs"
+    echo "• Minimum response time: ${MIN}μs"
+    echo "• Maximum response time: ${MAX}μs"
+    echo "• Average response time: ${AVG}μs"
 }
 
-# GC分析
+# GC analysis
 analyze_gc() {
     echo ""
-    echo "🔍 步骤6: GC分析"
+    echo "🔍 Step 6: GC analysis"
     echo "==============="
     
     TOTAL_GC=$(grep -c "GC(" comprehensive_gc.log)
@@ -136,36 +136,36 @@ analyze_gc() {
     MIXED_GC=$(grep -c "Mixed" comprehensive_gc.log)
     FULL_GC=$(grep -c "Pause Full" comprehensive_gc.log 2>/dev/null || echo "0")
     
-    echo "🗂️  GC事件统计:"
-    echo "• Young GC (Minor GC): $YOUNG_GC 次"
-    echo "• Mixed GC: $MIXED_GC 次"  
-    echo "• Full GC: $FULL_GC 次"
-    echo "• 总GC次数: $TOTAL_GC 次"
+    echo "🗂️  GC event statistics:"
+    echo "• Young GC (Minor GC): $YOUNG_GC times"
+    echo "• Mixed GC: $MIXED_GC times"
+    echo "• Full GC: $FULL_GC times"
+    echo "• Total GC count: $TOTAL_GC times"
     
     echo ""
-    echo "⚡ 混合负载GC影响分析:"
-    echo "• 混合负载期间GC增量: $MIXED_GC_INCREASE 次"
-    echo "• 纯GET期间GC增量: $GET_GC_INCREASE 次"
-    echo "• GC频率差异: 混合负载明显高于纯GET"
+    echo "⚡ Mixed workload GC impact analysis:"
+    echo "• GC increase during mixed workload: $MIXED_GC_INCREASE times"
+    echo "• GC increase during pure GET: $GET_GC_INCREASE times"
+    echo "• GC frequency difference: Mixed workload significantly higher than pure GET"
     
     echo ""
-    echo "📋 性能对比总结:"
+    echo "📋 Performance comparison summary:"
     printf "+------------------+-------+--------+\n"
-    printf "| 测试类型         | GC增量 | 说明   |\n"
+    printf "| Test Type        | GC Increase | Description |\n"
     printf "+------------------+-------+--------+\n"
-    printf "| 混合负载(30秒)   | %5d | DELETE引起 |\n" $MIXED_GC_INCREASE
-    printf "| 纯GET(1000请求)  | %5d | 稳定运行 |\n" $GET_GC_INCREASE
+    printf "| Mixed Workload(30s) | %5d | Caused by DELETE |\n" $MIXED_GC_INCREASE
+    printf "| Pure GET(1000 req)  | %5d | Stable run |\n" $GET_GC_INCREASE
     printf "+------------------+-------+--------+\n"
     
     if [ "$MIXED_GC_INCREASE" -gt "$GET_GC_INCREASE" ]; then
-        GC_RATIO=$((MIXED_GC_INCREASE * 100 / (GET_GC_INCREASE + 1)))  # 避免除零
+        GC_RATIO=$((MIXED_GC_INCREASE * 100 / (GET_GC_INCREASE + 1)))  # Avoid division by zero
         echo ""
-        echo "🎯 结论: DELETE操作显著增加了GC频率!"
-        echo "混合负载GC增量是纯GET的 ${GC_RATIO}% 以上"
+        echo "🎯 Conclusion: DELETE operations significantly increased GC frequency!"
+        echo "Mixed workload GC increase is ${GC_RATIO}% more than pure GET"
     fi
 }
 
-# 主执行流程
+# Main execution flow
 main() {
     start_app
     load_data
@@ -175,12 +175,12 @@ main() {
     analyze_gc
     
     echo ""
-    echo "🎉 综合测试完成!"
+    echo "🎉 Comprehensive test completed!"
     echo "================="
-    echo "测试结果表明:"
-    echo "1. 混合负载期间GC频率显著高于纯GET"
-    echo "2. P95/P99响应时间反映了GC的影响"
-    echo "3. DELETE操作确实会导致额外的GC开销"
+    echo "Test results indicate:"
+    echo "1. GC frequency significantly higher during mixed workload than pure GET"
+    echo "2. P95/P99 response times reflect GC impact"
+    echo "3. DELETE operations do cause additional GC overhead"
 }
 
 main "$@"

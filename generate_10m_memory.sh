@@ -1,32 +1,32 @@
 #!/bin/bash
 
-echo "🚀 生成1000万个用户数据到内存中"
+echo "🚀 Generating 10 million user data into memory"
 echo "================================="
 
 # API URL
 API_URL="http://localhost:8080/api/owners/generate/10000000"
 
 echo "API URL: $API_URL"
-echo "开始发送请求..."
+echo "Starting to send request..."
 
-# 发送生成请求
+# Send generation request
 response=$(curl -s -X POST "$API_URL")
 
 if [ $? -eq 0 ]; then
-    echo "✅ 请求发送成功!"
-    echo "响应: $response"
+    echo "✅ Request sent successfully!"
+    echo "Response: $response"
 else
-    echo "❌ 请求失败!"
+    echo "❌ Request failed!"
     exit 1
 fi
 
 echo ""
-echo "📊 验证数据生成结果..."
+echo "📊 Verifying data generation results..."
 sleep 2
 
-# 检查用户数量
+# Check user count
 count_response=$(curl -s -X GET "http://localhost:8080/api/owners/count")
-echo "当前用户数量: $count_response"
+echo "Current user count: $count_response"
 
 echo ""
-echo "🎉 1000万用户数据生成完成!"
+echo "🎉 10 million user data generation completed!"
