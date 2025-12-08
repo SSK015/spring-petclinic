@@ -345,27 +345,44 @@ class OwnerController {
 	}
 
 	/**
-	 * REST API endpoint to get a specific owner with their pets as JSON
-	 * @param ownerId the ID of the owner to retrieve
-	 * @return the owner with their pets
+	 * REST API endpoint to get all owners in the shard containing the specified owner ID.
+	 * This simulates loading the entire 1MB memory block for that shard.
+	 * @param ownerId the ID of the owner whose shard to retrieve
+	 * @return all owners in the same shard as the specified owner
 	 */
+
 	@GetMapping("/api/owners/{ownerId}")
-	public @ResponseBody ResponseEntity<Owner> getOwnerWithPetsApi(@PathVariable("ownerId") int ownerId) {
+	public @ResponseBody ResponseEntity<List<Owner>> getOwnerWithPetsApi(@PathVariable("ownerId") int ownerId) {
 		long startTime = System.nanoTime();
 		try {
-			Optional<Owner> optionalOwner = this.owners.findById(ownerId);
-			ResponseEntity<Owner> response;
-			if (optionalOwner.isPresent()) {
-				Owner owner = optionalOwner.get();
-				response = ResponseEntity.ok(owner);
+			// Check if the ShardedOwnerRepository has the findAllOwnersInShard method
+			if (this.owners instanceof org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository) {
+				org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository shardedRepo = (org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository) this.owners;
+				List<Owner> shardOwners = shardedRepo.findAllOwnersInShard(ownerId);
+				long responseTime = (System.nanoTime() - startTime) / 1000; // Convert to
+																			// microseconds
+				recordResponseTime(responseTime);
+				return ResponseEntity.ok(shardOwners);
 			}
 			else {
-				response = ResponseEntity.notFound().build();
+				// Fallback to original behavior if not using sharded repository
+				Optional<Owner> optionalOwner = this.owners.findById(ownerId);
+				if (optionalOwner.isPresent()) {
+					Owner owner = optionalOwner.get();
+					List<Owner> singleOwnerList = new ArrayList<>();
+					singleOwnerList.add(owner);
+					long responseTime = (System.nanoTime() - startTime) / 1000; // Convert
+																				// to
+																				// microseconds
+					recordResponseTime(responseTime);
+					return ResponseEntity.ok(singleOwnerList);
+				}
+				else {
+					long responseTime = (System.nanoTime() - startTime) / 1000;
+					recordResponseTime(responseTime);
+					return ResponseEntity.notFound().build();
+				}
 			}
-			long responseTime = (System.nanoTime() - startTime) / 1000; // Convert to
-																		// microseconds
-			recordResponseTime(responseTime);
-			return response;
 		}
 		catch (Exception e) {
 			long responseTime = (System.nanoTime() - startTime) / 1000;

@@ -38,7 +38,7 @@ public class InMemoryStorageConfiguration {
 	@Bean
 	@Primary
 	public OwnerRepository ownerRepository() {
-		return new InMemoryOwnerRepository();
+		return new ShardedOwnerRepository();
 	}
 
 	@Bean
