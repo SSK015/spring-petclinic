@@ -40,7 +40,8 @@ import java.util.stream.Collectors;
 @Repository
 public class ShardedOwnerRepository extends InMemoryRepository<Owner, Integer> implements OwnerRepository {
 
-	private static final int SHARD_SIZE = 1000; // 1000 owners per shard
+	// Use the same SHARD_SIZE as OwnerShard
+	private static final int SHARD_SIZE = OwnerShard.SHARD_SIZE;
 
 	// Map of shardId -> OwnerShard
 	private final ConcurrentMap<Integer, OwnerShard> shards = new ConcurrentHashMap<>();
@@ -176,18 +177,38 @@ public class ShardedOwnerRepository extends InMemoryRepository<Owner, Integer> i
 	@Override
 	public Owner save(Owner entity) {
 		if (entity.isNew()) {
-			entity.setId(generateId());
+			// For INSERT operations, generate ID and check if it already exists
+			Integer generatedId = generateId();
+
+			// Check if ID already exists (from ID reuse or other reasons)
+			Optional<Owner> existing = findById(generatedId);
+			if (existing.isPresent()) {
+				// ID already exists, skip INSERT and return existing owner
+				return existing.get();
+			}
+
+			// ID doesn't exist, proceed with INSERT
+			entity.setId(generatedId);
+			int shardId = getShardId(generatedId);
+			int index = getIndexInShard(generatedId);
+
+			OwnerShard shard = getOrCreateShard(shardId);
+			if (!shard.storeOwner(index, entity)) {
+				throw new RuntimeException("Failed to store owner in shard");
+			}
+			return entity;
 		}
+		else {
+			// For UPDATE operations, allow overwriting
+			int shardId = getShardId(entity.getId());
+			int index = getIndexInShard(entity.getId());
 
-		int shardId = getShardId(entity.getId());
-		int index = getIndexInShard(entity.getId());
-
-		OwnerShard shard = getOrCreateShard(shardId);
-		if (!shard.storeOwner(index, entity)) {
-			throw new RuntimeException("Failed to store owner in shard");
+			OwnerShard shard = getOrCreateShard(shardId);
+			if (!shard.storeOwner(index, entity)) {
+				throw new RuntimeException("Failed to store owner in shard");
+			}
+			return entity;
 		}
-
-		return entity;
 	}
 
 	@Override
@@ -205,7 +226,10 @@ public class ShardedOwnerRepository extends InMemoryRepository<Owner, Integer> i
 		OwnerShard shard = shards.get(shardId);
 		if (shard != null) {
 			int index = getIndexInShard(id);
-			shard.deleteOwner(index);
+			if (shard.deleteOwner(index)) {
+				// Add deleted ID to reusable queue for ID reuse
+				reusableIds.offer(id);
+			}
 		}
 	}
 
@@ -216,11 +240,15 @@ public class ShardedOwnerRepository extends InMemoryRepository<Owner, Integer> i
 
 	@Override
 	public long count() {
-		long total = 0;
+		// Count active shards (shards with at least one owner)
+		long activeShardCount = 0;
 		for (OwnerShard shard : shards.values()) {
-			total += shard.getOccupiedCount();
+			if (shard.getOccupiedCount() > 0) {
+				activeShardCount++;
+			}
 		}
-		return total;
+		// Return user_count = active_shard_count * SHARD_SIZE
+		return activeShardCount * SHARD_SIZE;
 	}
 
 	@Override
@@ -321,7 +349,8 @@ public class ShardedOwnerRepository extends InMemoryRepository<Owner, Integer> i
 
 	/**
 	 * Get all owners in the shard that contains the specified owner ID. This simulates
-	 * loading the entire 1MB memory block for that shard.
+	 * loading the entire 1MB memory block for that shard. Only returns owners that
+	 * actually belong to this shard (validates owner IDs).
 	 */
 	public List<Owner> findAllOwnersInShard(int ownerId) {
 		int shardId = getShardId(ownerId);
@@ -329,7 +358,78 @@ public class ShardedOwnerRepository extends InMemoryRepository<Owner, Integer> i
 		if (shard == null) {
 			return new ArrayList<>();
 		}
-		return shard.getAllOwners();
+		List<Owner> allOwners = shard.getAllOwners();
+		// Filter to only include owners that actually belong to this shard
+		int shardStartId = shardId * SHARD_SIZE;
+		int shardEndId = (shardId + 1) * SHARD_SIZE;
+		return allOwners.stream()
+			.filter(owner -> owner != null && owner.getId() != null && owner.getId() >= shardStartId
+					&& owner.getId() < shardEndId)
+			.collect(java.util.stream.Collectors.toList());
+	}
+
+	/**
+	 * Delete entire shard that contains the specified owner ID. This deletes all owners
+	 * in that shard.
+	 */
+	public boolean deleteShard(int ownerId) {
+		int shardId = getShardId(ownerId);
+		OwnerShard shard = shards.remove(shardId);
+		if (shard != null) {
+			// Add all deleted IDs to reusable queue
+			List<Owner> ownersInShard = shard.getAllOwners();
+			for (Owner owner : ownersInShard) {
+				if (owner != null && owner.getId() != null) {
+					reusableIds.offer(owner.getId());
+				}
+			}
+			shard.clear();
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Insert an entire shard (1000 owners). The owners will be stored in the shard
+	 * corresponding to the first owner's ID. If the shard already exists and has owners,
+	 * the operation will be skipped (return false).
+	 * @return true if shard was inserted successfully, false if shard already exists
+	 */
+	public boolean insertShard(List<Owner> owners) {
+		if (owners == null || owners.isEmpty()) {
+			return false;
+		}
+
+		// Get shard ID from first owner
+		Integer firstOwnerId = owners.get(0).getId();
+		if (firstOwnerId == null) {
+			throw new IllegalArgumentException("First owner must have an ID");
+		}
+
+		int shardId = getShardId(firstOwnerId);
+		OwnerShard shard = shards.get(shardId);
+
+		// If shard already exists and has owners, skip insertion
+		if (shard != null && shard.getOccupiedCount() > 0) {
+			return false; // Shard already exists, skip
+		}
+
+		// Create shard if it doesn't exist
+		if (shard == null) {
+			shard = getOrCreateShard(shardId);
+		}
+
+		// Store all owners in the shard
+		for (Owner owner : owners) {
+			if (owner.getId() == null) {
+				continue; // Skip owners without ID
+			}
+			int index = getIndexInShard(owner.getId());
+			if (!shard.storeOwner(index, owner)) {
+				throw new RuntimeException("Failed to store owner " + owner.getId() + " in shard " + shardId);
+			}
+		}
+		return true;
 	}
 
 }

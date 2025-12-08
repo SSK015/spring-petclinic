@@ -450,6 +450,107 @@ class OwnerController {
 		return ResponseEntity.ok(Map.of("createdIds", createdIds, "count", createdIds.size()));
 	}
 
+	@PostMapping("/api/owners/generate-shards/{shardCount}")
+	public @ResponseBody ResponseEntity<?> generateShards(@PathVariable int shardCount) {
+		long startTime = System.currentTimeMillis();
+
+		// Check if using ShardedOwnerRepository
+		if (!(this.owners instanceof org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository)) {
+			return ResponseEntity.badRequest()
+				.body(Map.of("error", "Shard generation only works with ShardedOwnerRepository"));
+		}
+
+		org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository shardedRepo = (org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository) this.owners;
+
+		// Use multithreading to generate shards in parallel
+		int threadCount = Math.min(Runtime.getRuntime().availableProcessors(), 8);
+		int shardsPerThread = shardCount / threadCount;
+		List<CompletableFuture<Integer>> futures = new ArrayList<>();
+
+		// Create random data generator
+		String[] firstNames = { "张", "李", "王", "赵", "陈", "刘", "杨", "黄", "周", "吴" };
+		String[] lastNames = { "伟", "强", "军", "明", "刚", "健", "华", "建", "国", "庆" };
+		String[] cities = { "BJ", "SH", "GZ", "SZ", "HZ", "NJ", "SU", "WH", "CD", "CQ" };
+
+		// Get SHARD_SIZE from OwnerShard
+		int shardSize = org.springframework.samples.petclinic.repository.memory.OwnerShard.SHARD_SIZE;
+
+		// Get next available shard ID
+		// Always start from shard 0 if no data exists, otherwise continue from current
+		long currentCount = this.owners.count();
+		int nextShardId = currentCount == 0 ? 0 : (int) (currentCount / shardSize);
+
+		for (int t = 0; t < threadCount; t++) {
+			int threadIndex = t;
+			CompletableFuture<Integer> future = CompletableFuture.supplyAsync(() -> {
+				int startShard = threadIndex * shardsPerThread;
+				int endShard = (threadIndex == threadCount - 1) ? shardCount : (threadIndex + 1) * shardsPerThread;
+				int created = 0;
+
+				Random random = new Random();
+				List<PetType> availableTypes = petTypes.findPetTypes();
+
+				for (int s = startShard; s < endShard; s++) {
+					int shardId = nextShardId + s;
+					int baseId = shardId * shardSize;
+					List<Owner> shardOwners = new ArrayList<>();
+
+					// Generate owners for this shard (use actual SHARD_SIZE)
+					for (int i = 0; i < shardSize; i++) {
+						Owner owner = new Owner();
+						owner.setId(baseId + i);
+						owner.setFirstName(firstNames[random.nextInt(firstNames.length)]);
+						owner.setLastName(lastNames[random.nextInt(lastNames.length)]);
+						owner.setAddress("Addr" + (baseId + i));
+						owner.setCity(cities[random.nextInt(cities.length)]);
+						owner.setTelephone(String.valueOf(1000000000L + random.nextInt(900000000)));
+
+						// Generate random pets (1-3)
+						int petCount = random.nextInt(3) + 1;
+						for (int p = 0; p < petCount; p++) {
+							Pet pet = new Pet();
+							pet.setName("P" + (p + 1) + "-" + owner.getLastName().charAt(0));
+							pet.setBirthDate(
+									LocalDate.now().minusYears(random.nextInt(5) + 1).minusDays(random.nextInt(365)));
+							pet.setType(availableTypes.get(random.nextInt(availableTypes.size())));
+							pet.getVisits().clear();
+							owner.addPet(pet);
+						}
+						shardOwners.add(owner);
+					}
+
+					// Insert entire shard
+					shardedRepo.insertShard(shardOwners);
+					created++;
+				}
+
+				return created;
+			});
+
+			futures.add(future);
+		}
+
+		// Wait for all threads to complete
+		int totalCreated = futures.stream().mapToInt(future -> {
+			try {
+				return future.get();
+			}
+			catch (Exception e) {
+				throw new RuntimeException(e);
+			}
+		}).sum();
+
+		long endTime = System.currentTimeMillis();
+		double duration = (endTime - startTime) / 1000.0;
+		long totalOwners = totalCreated * (long) shardSize;
+
+		return ResponseEntity.ok(Map.of("totalShards", totalCreated, "totalOwners", totalOwners, "duration",
+				String.format("%.2fs", duration), "speed", String.format("%.0f shards/sec", totalCreated / duration),
+				"memoryEstimate", String.format("%.1f MB", totalOwners * 0.001) // 1KB per
+																				// owner
+		));
+	}
+
 	@PostMapping("/api/owners/generate/{count}")
 	public @ResponseBody ResponseEntity<?> generateOwnersInMemory(@PathVariable int count) {
 		long startTime = System.currentTimeMillis();
@@ -536,19 +637,19 @@ class OwnerController {
 		));
 	}
 
-	@PostMapping("/api/owners/getloadtest/{threads}/{duration}/{qpsLimit}")
+	@PostMapping("/api/owners/getloadtest/{threads}/{duration}/{targetQps}")
 	public @ResponseBody ResponseEntity<?> runGetOnlyLoadTest(@PathVariable int threads, @PathVariable int duration,
-			@PathVariable int qpsLimit) {
+			@PathVariable int targetQps) {
 		long startTime = System.nanoTime();
 
 		// Check if there is data
-		if (this.owners.findAll().isEmpty()) {
+		if (this.owners.count() == 0) {
 			return ResponseEntity.badRequest()
 				.body(Map.of("error", "No data available. Please generate owners first."));
 		}
 
-		// Get total number of users
-		int totalOwners = this.owners.findAll().size();
+		// Get total number of users (shard_count * 1000)
+		int totalOwners = (int) this.owners.count();
 
 		// Use multithreading for pure GET load testing
 		ExecutorService executor = Executors.newFixedThreadPool(threads);
@@ -557,7 +658,7 @@ class OwnerController {
 		// Record statistics for each thread
 		for (int t = 0; t < threads; t++) {
 			CompletableFuture<LoadTestResult> future = CompletableFuture.supplyAsync(() -> {
-				return runGetOnlySingleThreadLoadTest(totalOwners, duration, qpsLimit);
+				return runGetOnlySingleThreadLoadTest(totalOwners, duration, targetQps);
 			}, executor);
 			futures.add(future);
 		}
@@ -596,7 +697,7 @@ class OwnerController {
 		result.put("totalErrors", totalErrors);
 		result.put("successRate", String.format("%.2f%%", (totalRequests - totalErrors) * 100.0 / totalRequests));
 		result.put("qps", String.format("%.0f", qps));
-		result.put("qpsLimit", qpsLimit);
+		result.put("targetQps", targetQps);
 		result.put("avgResponseTime",
 				totalRequests > 0 ? String.format("%.2f μs", totalResponseTime * 1.0 / totalRequests) : "0");
 		result.put("minResponseTime", String.format("%.2f μs", minResponseTime * 1.0));
@@ -612,19 +713,34 @@ class OwnerController {
 		return ResponseEntity.ok(result);
 	}
 
-	@PostMapping("/api/owners/loadtest/{threads}/{duration}/{qpsLimit}")
+	@PostMapping("/api/owners/loadtest/{threads}/{duration}/{requestLimit}")
 	public @ResponseBody ResponseEntity<?> runInMemoryLoadTest(@PathVariable int threads, @PathVariable int duration,
-			@PathVariable int qpsLimit) {
+			@PathVariable int requestLimit) {
 		long startTime = System.nanoTime();
 
 		// Check if there is data
-		if (this.owners.findAll().isEmpty()) {
+		if (this.owners.count() == 0) {
 			return ResponseEntity.badRequest()
 				.body(Map.of("error", "No data available. Please generate owners first."));
 		}
 
-		// Get total number of users
-		int totalOwners = this.owners.findAll().size();
+		// Get total number of users (shard_count * SHARD_SIZE)
+		final int totalOwners = (int) this.owners.count();
+		final int finalDuration = duration;
+
+		// Calculate target QPS based on duration and request limit
+		// If requestLimit is 0, it means unlimited (no request count limit, only time
+		// limit)
+		final int targetQps; // 0 means no QPS limit
+		final int requestLimitPerThread; // Unlimited
+		if (requestLimit > 0) {
+			targetQps = requestLimit / finalDuration;
+			requestLimitPerThread = requestLimit / threads;
+		}
+		else {
+			targetQps = 0; // No QPS limit
+			requestLimitPerThread = Integer.MAX_VALUE; // Unlimited request count
+		}
 
 		// Use multithreading for load testing
 		ExecutorService executor = Executors.newFixedThreadPool(threads);
@@ -633,7 +749,7 @@ class OwnerController {
 		// Record statistics for each thread
 		for (int t = 0; t < threads; t++) {
 			CompletableFuture<LoadTestResult> future = CompletableFuture.supplyAsync(() -> {
-				return runSingleThreadLoadTest(totalOwners, duration, qpsLimit);
+				return runSingleThreadLoadTest(totalOwners, finalDuration, targetQps, requestLimitPerThread);
 			}, executor);
 			futures.add(future);
 		}
@@ -671,7 +787,10 @@ class OwnerController {
 		result.put("totalErrors", totalErrors);
 		result.put("successRate", String.format("%.2f%%", (totalRequests - totalErrors) * 100.0 / totalRequests));
 		result.put("qps", String.format("%.0f", qps));
-		result.put("qpsLimit", qpsLimit);
+		result.put("targetQps", requestLimit > 0 ? requestLimit / duration : "unlimited"); // QPS
+																							// limit
+																							// or
+																							// unlimited
 		result.put("avgResponseTime",
 				totalRequests > 0 ? String.format("%.2f μs", totalResponseTime * 1.0 / totalRequests) : "0");
 		result.put("minResponseTime", String.format("%.2f μs", minResponseTime * 1.0));
@@ -700,99 +819,146 @@ class OwnerController {
 
 	}
 
-	private LoadTestResult runSingleThreadLoadTest(int totalOwners, int durationSeconds, int qpsLimit) {
+	private LoadTestResult runSingleThreadLoadTest(int totalOwners, int durationSeconds, int targetQps,
+			int requestLimitPerThread) {
 		LoadTestResult result = new LoadTestResult();
 		Random random = new Random();
 		long testStartTime = System.nanoTime();
-		long endTime = testStartTime + (durationSeconds * 1_000_000_000L);
+		long maxEndTime = testStartTime + (durationSeconds * 1_000_000_000L);
 
 		// QPS control variables - pre-calculate request intervals for precise timing
-		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // Interval
-																			// between
-																			// requests in
-																			// nanoseconds
-		int requestIndex = 0;
+		long intervalNanos = targetQps > 0 ? 1_000_000_000L / targetQps : 0; // Interval
+																				// between
+																				// requests
+																				// in
+																				// nanoseconds
+
+		// Track next request time based on actual time, not request index
+		// This ensures strict QPS control even if request processing takes longer than
+		// interval
+		long nextRequestTime = testStartTime;
 
 		// To avoid JVM over-optimization, we add some unpredictable operations
 		long dummyCounter = 0;
 
-		while (System.nanoTime() < endTime) {
-			// Calculate expected arrival time for this request: start_time + req_idx *
-			// interval
-			long expectedArrivalTime = testStartTime + (requestIndex * intervalNanos);
-
-			// Wait until the expected arrival time (if QPS control is enabled)
-			if (qpsLimit > 0) {
+		// If requestLimitPerThread is MAX_VALUE, only check time limit
+		while ((requestLimitPerThread == Integer.MAX_VALUE || result.requests < requestLimitPerThread)
+				&& System.nanoTime() < maxEndTime) {
+			// Wait until the next request time (if QPS control is enabled)
+			if (targetQps > 0) {
 				long currentTime = System.nanoTime();
-				if (currentTime < expectedArrivalTime) {
-					// Wait until expected arrival time
-					while (System.nanoTime() < expectedArrivalTime) {
-						// Busy wait with yield for precise timing
-						// Thread.yield();
+				if (currentTime < nextRequestTime) {
+					// Wait until next request time
+					while (System.nanoTime() < nextRequestTime) {
+						// Busy wait for precise timing
 					}
 				}
+				// Update next request time: current time + interval
+				// This ensures we maintain strict QPS even if processing takes longer
+				nextRequestTime = Math.max(System.nanoTime(), nextRequestTime) + intervalNanos;
 			}
 
 			long requestStart = System.nanoTime();
 
 			try {
 				// 70% GET, 15% POST (INSERT), 15% DELETE - simulate mixed workload
+				// All operations are at shard level: GET returns entire shard, DELETE
+				// deletes
+				// entire shard, INSERT inserts entire shard
 				int operationType = random.nextInt(100);
 
 				if (operationType < 70) {
-					// GET operation
-					int ownerId = random.nextInt(totalOwners) + 1; // 1-based ID
-					Owner owner = this.owners.findById(ownerId).orElse(null);
-					if (owner != null) {
-						// Perform more realistic computation operations to avoid JVM
-						// optimization
-						String firstName = owner.getFirstName();
-						String lastName = owner.getLastName();
-						String address = owner.getCity();
-
-						// Calculate string hash values (with actual computation overhead)
-						int hash = firstName.hashCode() + lastName.hashCode() + address.hashCode();
-						dummyCounter += hash; // Use result to avoid being optimized away
-
-						// Iterate through pet list and perform calculations
-						for (Pet pet : owner.getPets()) {
-							String petName = pet.getName();
-							String typeName = pet.getType().getName();
-							hash = petName.hashCode() + typeName.hashCode();
-							dummyCounter += hash;
-						}
-
-						// Add some random calculations to simulate business logic
-						if ((dummyCounter & 0xFF) == 0) {
-							// Rarely executed branch, avoid being optimized
-							dummyCounter += Math.abs(ownerId);
+					// GET operation - get entire shard
+					if (this.owners instanceof org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository) {
+						org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository shardedRepo = (org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository) this.owners;
+						int ownerId = random.nextInt(totalOwners) + 1; // 1-based ID
+						List<Owner> shardOwners = shardedRepo.findAllOwnersInShard(ownerId);
+						// Process all owners in shard
+						for (Owner owner : shardOwners) {
+							if (owner != null) {
+								String firstName = owner.getFirstName();
+								String lastName = owner.getLastName();
+								String address = owner.getCity();
+								int hash = firstName.hashCode() + lastName.hashCode() + address.hashCode();
+								dummyCounter += hash;
+								for (Pet pet : owner.getPets()) {
+									String petName = pet.getName();
+									String typeName = pet.getType().getName();
+									hash = petName.hashCode() + typeName.hashCode();
+									dummyCounter += hash;
+								}
+							}
 						}
 					}
 				}
 				else if (operationType < 85) {
-					// POST operation (INSERT) - create new user
-					Owner newOwner = new Owner();
-					newOwner.setFirstName("LoadTest" + random.nextInt(1000000));
-					newOwner.setLastName("User");
-					newOwner.setAddress("Test Address");
-					newOwner.setCity("TestCity");
-					newOwner.setTelephone(String.valueOf(1000000000L + random.nextInt(900000000)));
+					// POST operation (INSERT) - insert entire shard
+					if (this.owners instanceof org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository) {
+						org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository shardedRepo = (org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository) this.owners;
+						List<Owner> newShardOwners = new ArrayList<>();
+						List<PetType> availableTypes = petTypes.findPetTypes();
 
-					this.owners.save(newOwner);
-					dummyCounter += newOwner.getId(); // Use ID to avoid optimization
-				}
-				else {
-					// DELETE operation - delete random user
-					int ownerId = random.nextInt(totalOwners) + 1; // 1-based ID
-					try {
-						Owner ownerToDelete = this.owners.findById(ownerId).orElse(null);
-						if (ownerToDelete != null) {
-							this.owners.delete(ownerToDelete);
-							dummyCounter += ownerId; // Use ID to avoid optimization
+						// Get SHARD_SIZE from OwnerShard
+						int shardSize = org.springframework.samples.petclinic.repository.memory.OwnerShard.SHARD_SIZE;
+
+						// Find the next available shard ID (avoid overwriting existing
+						// shards)
+						long currentCount = this.owners.count();
+						int startShardId = (int) (currentCount / shardSize);
+						int shardId = startShardId;
+						int baseId = 0;
+						boolean inserted = false;
+
+						// Try to find an available shard (max 100 attempts)
+						for (int attempt = 0; attempt < 100; attempt++) {
+							shardId = startShardId + attempt;
+							baseId = shardId * shardSize;
+							newShardOwners.clear();
+
+							// Generate owners for this shard (use actual SHARD_SIZE)
+							for (int i = 0; i < shardSize; i++) {
+								Owner newOwner = new Owner();
+								newOwner.setId(baseId + i);
+								newOwner.setFirstName("LoadTest" + random.nextInt(1000000));
+								newOwner.setLastName("User");
+								newOwner.setAddress("Test Address " + i);
+								newOwner.setCity("TestCity");
+								newOwner.setTelephone(String.valueOf(1000000000L + random.nextInt(900000000)));
+
+								// Add 1-3 pets per owner
+								int petCount = random.nextInt(3) + 1;
+								for (int p = 0; p < petCount; p++) {
+									Pet pet = new Pet();
+									pet.setName("P" + (p + 1) + "-" + newOwner.getLastName().charAt(0));
+									pet.setBirthDate(LocalDate.now()
+										.minusYears(random.nextInt(5) + 1)
+										.minusDays(random.nextInt(365)));
+									pet.setType(availableTypes.get(random.nextInt(availableTypes.size())));
+									pet.getVisits().clear();
+									newOwner.addPet(pet);
+								}
+								newShardOwners.add(newOwner);
+							}
+
+							// Try to insert shard
+							if (shardedRepo.insertShard(newShardOwners)) {
+								inserted = true;
+								break;
+							}
+						}
+
+						if (inserted) {
+							dummyCounter += baseId;
 						}
 					}
-					catch (Exception e) {
-						// Delete non-existent user, ignore error
+				}
+				else {
+					// DELETE operation - delete entire shard
+					if (this.owners instanceof org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository) {
+						org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository shardedRepo = (org.springframework.samples.petclinic.repository.memory.ShardedOwnerRepository) this.owners;
+						int ownerId = random.nextInt(totalOwners) + 1; // 1-based ID
+						shardedRepo.deleteShard(ownerId);
+						dummyCounter += ownerId;
 					}
 				}
 			}
@@ -813,9 +979,6 @@ class OwnerController {
 			if (random.nextInt(100) < 1) {
 				recordResponseTime(responseTime);
 			}
-
-			// Increment request index for next request timing
-			requestIndex++;
 		}
 
 		// Print dummyCounter to ensure calculations are not optimized away
@@ -824,37 +987,40 @@ class OwnerController {
 		return result;
 	}
 
-	private LoadTestResult runGetOnlySingleThreadLoadTest(int totalOwners, int durationSeconds, int qpsLimit) {
+	private LoadTestResult runGetOnlySingleThreadLoadTest(int totalOwners, int durationSeconds, int targetQps) {
 		LoadTestResult result = new LoadTestResult();
 		Random random = new Random();
 		long testStartTime = System.nanoTime();
 		long endTime = testStartTime + (durationSeconds * 1_000_000_000L);
 
 		// QPS control variables - pre-calculate request intervals for precise timing
-		long intervalNanos = qpsLimit > 0 ? 1_000_000_000L / qpsLimit : 0; // Interval
-																			// between
-																			// requests in
-																			// nanoseconds
-		int requestIndex = 0;
+		long intervalNanos = targetQps > 0 ? 1_000_000_000L / targetQps : 0; // Interval
+																				// between
+																				// requests
+																				// in
+																				// nanoseconds
+
+		// Track next request time based on actual time, not request index
+		// This ensures strict QPS control even if request processing takes longer than
+		// interval
+		long nextRequestTime = testStartTime;
 
 		// To avoid JVM over-optimization, we add some unpredictable operations
 		long dummyCounter = 0;
 
 		while (System.nanoTime() < endTime) {
-			// Calculate expected arrival time for this request: start_time + req_idx *
-			// interval
-			long expectedArrivalTime = testStartTime + (requestIndex * intervalNanos);
-
-			// Wait until the expected arrival time (if QPS control is enabled)
-			if (qpsLimit > 0) {
+			// Wait until the next request time (if QPS control is enabled)
+			if (targetQps > 0) {
 				long currentTime = System.nanoTime();
-				if (currentTime < expectedArrivalTime) {
-					// Wait until expected arrival time
-					while (System.nanoTime() < expectedArrivalTime) {
-						// Busy wait with yield for precise timing
-						// Thread.yield();
+				if (currentTime < nextRequestTime) {
+					// Wait until next request time
+					while (System.nanoTime() < nextRequestTime) {
+						// Busy wait for precise timing
 					}
 				}
+				// Update next request time: current time + interval
+				// This ensures we maintain strict QPS even if processing takes longer
+				nextRequestTime = Math.max(System.nanoTime(), nextRequestTime) + intervalNanos;
 			}
 
 			long requestStart = System.nanoTime();
@@ -901,9 +1067,6 @@ class OwnerController {
 			result.maxResponseTime = Math.max(result.maxResponseTime, responseTime);
 			result.minResponseTime = Math.min(result.minResponseTime, result.minResponseTime);
 			result.totalResponseTime += responseTime;
-
-			// Increment request index for next request timing
-			requestIndex++;
 		}
 
 		return result;

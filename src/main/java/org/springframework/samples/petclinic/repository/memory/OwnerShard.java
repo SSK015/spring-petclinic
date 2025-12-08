@@ -27,7 +27,7 @@ import java.util.List;
  */
 public class OwnerShard {
 
-	private static final int SHARD_SIZE = 1000;
+	public static final int SHARD_SIZE = 50;
 
 	private final int shardId;
 
@@ -49,7 +49,8 @@ public class OwnerShard {
 
 	/**
 	 * Store an owner in this shard at the specified index. Returns true if successful,
-	 * false if index out of bounds or slot occupied.
+	 * false if index out of bounds. Allows overwriting if the slot is occupied by the
+	 * same owner (update operation).
 	 */
 	public boolean storeOwner(int index, Owner owner) {
 		if (index < 0 || index >= SHARD_SIZE) {
@@ -57,9 +58,20 @@ public class OwnerShard {
 		}
 
 		synchronized (locks[index]) {
+			// If slot is occupied, check if it's the same owner (update) or different
+			// (conflict)
 			if (occupied.get(index)) {
-				return false; // Slot already occupied
+				Owner existing = owners[index];
+				if (existing != null && existing.getId() != null && owner.getId() != null
+						&& existing.getId().equals(owner.getId())) {
+					// Same owner, allow update
+					owners[index] = owner;
+					return true;
+				}
+				// Different owner in this slot, conflict
+				return false;
 			}
+			// Slot is free, insert new owner
 			owners[index] = owner;
 			occupied.set(index);
 			return true;

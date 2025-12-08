@@ -13,11 +13,119 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Check heap memory usage
+check_heap_memory() {
+    # Get PID if not set
+    if [ -z "$APP_PID" ]; then
+        APP_PID=$(pgrep -f "spring-petclinic.*jar" 2>/dev/null | head -1)
+    fi
+    
+    if [ -z "$APP_PID" ]; then
+        echo "⚠️  Could not find Java process PID"
+        return
+    fi
+    
+    # Method 1: Use jstat to get heap memory (most accurate for heap)
+    if command -v jstat >/dev/null 2>&1; then
+        JSTAT_OUTPUT=$(jstat -gc "$APP_PID" 2>/dev/null | tail -1)
+        if [ -n "$JSTAT_OUTPUT" ]; then
+            # jstat -gc output format:
+            # S0C S1C S0U S1U EC EU OC OU MC MU CCSC CCSU YGC YGCT FGC FGCT GCT
+            # EC = Eden Capacity, EU = Eden Used
+            # OC = Old Capacity, OU = Old Used
+            # MC = Metaspace Capacity, MU = Metaspace Used
+            # Extract values from jstat output (values are in KB, may have decimals)
+            # jstat -gc output format:
+            # S0C S1C S0U S1U EC EU OC OU MC MU CCSC CCSU YGC YGCT FGC FGCT GCT
+            # Use awk to extract and sum directly to avoid bash arithmetic issues
+            HEAP_USED_KB=$(echo "$JSTAT_OUTPUT" | awk '{printf "%.0f", $6 + $8}')  # EU + OU
+            HEAP_MAX_KB=$(echo "$JSTAT_OUTPUT" | awk '{printf "%.0f", $5 + $7}')   # EC + OC
+            
+            # Convert to MB and GB
+            HEAP_USED_MB=$(awk "BEGIN {printf \"%.2f\", $HEAP_USED_KB / 1024}")
+            HEAP_USED_GB=$(awk "BEGIN {printf \"%.2f\", $HEAP_USED_MB / 1024}")
+            HEAP_MAX_MB=$(awk "BEGIN {printf \"%.2f\", $HEAP_MAX_KB / 1024}")
+            HEAP_MAX_GB=$(awk "BEGIN {printf \"%.2f\", $HEAP_MAX_MB / 1024}")
+            
+            # Get owner count and shard count
+            # Note: count() returns shard_count * SHARD_SIZE, so we need to divide by SHARD_SIZE
+            # SHARD_SIZE is currently 50, but we'll get it dynamically if possible
+            OWNER_COUNT=$(curl -s http://localhost:8080/api/owners/count 2>/dev/null || echo "0")
+            # Try to get actual shard count by checking a shard
+            # For now, assume SHARD_SIZE is 50 (or get from API if available)
+            SHARD_SIZE=50  # Default, should match OwnerShard.SHARD_SIZE
+            SHARD_COUNT=$((OWNER_COUNT / SHARD_SIZE))
+            
+            # Calculate memory per shard
+            if [ "$SHARD_COUNT" -gt 0 ] && [ "$HEAP_USED_MB" != "0.00" ]; then
+                MEMORY_PER_SHARD_MB=$(awk "BEGIN {printf \"%.2f\", $HEAP_USED_MB / $SHARD_COUNT}")
+                MEMORY_PER_SHARD_GB=$(awk "BEGIN {printf \"%.3f\", $MEMORY_PER_SHARD_MB / 1024}")
+            else
+                MEMORY_PER_SHARD_MB="0"
+                MEMORY_PER_SHARD_GB="0"
+            fi
+            
+            echo "📊 Heap Memory Statistics (from jstat):"
+            echo "• Total heap used: ${HEAP_USED_GB} GB (${HEAP_USED_MB} MB)"
+            echo "• Total heap max: ${HEAP_MAX_GB} GB (${HEAP_MAX_MB} MB)"
+            echo "• Owner count: ${OWNER_COUNT}"
+            echo "• Shard count: ${SHARD_COUNT}"
+            if [ "$SHARD_COUNT" -gt 0 ] && [ "$MEMORY_PER_SHARD_GB" != "0.000" ]; then
+                echo "• Memory per shard: ${MEMORY_PER_SHARD_GB} GB (${MEMORY_PER_SHARD_MB} MB)"
+            fi
+            return
+        fi
+    fi
+    
+    # Method 2: Use ps to get process RSS (Resident Set Size) - total memory used by process
+    if [ -n "$APP_PID" ]; then
+        # Get RSS in KB (Linux) or pages (other systems)
+        if [ "$(uname)" = "Linux" ]; then
+            RSS_KB_RAW=$(ps -p "$APP_PID" -o rss= 2>/dev/null | tr -d ' ')
+            RSS_KB=$(echo "$RSS_KB_RAW" | awk '{printf "%.0f", $1}')
+            if [ -n "$RSS_KB" ] && [ "$RSS_KB" != "0" ]; then
+                RSS_MB=$(awk "BEGIN {printf \"%.2f\", $RSS_KB / 1024}")
+                RSS_GB=$(awk "BEGIN {printf \"%.2f\", $RSS_MB / 1024}")
+                
+                # Get owner count
+                OWNER_COUNT=$(curl -s http://localhost:8080/api/owners/count 2>/dev/null || echo "0")
+                SHARD_SIZE=50  # Should match OwnerShard.SHARD_SIZE
+                SHARD_COUNT=$((OWNER_COUNT / SHARD_SIZE))
+                
+                # Calculate memory per shard
+                if [ "$SHARD_COUNT" -gt 0 ] && [ "$RSS_MB" != "0.00" ]; then
+                    MEMORY_PER_SHARD_MB=$(awk "BEGIN {printf \"%.2f\", $RSS_MB / $SHARD_COUNT}")
+                    MEMORY_PER_SHARD_GB=$(awk "BEGIN {printf \"%.3f\", $MEMORY_PER_SHARD_MB / 1024}")
+                else
+                    MEMORY_PER_SHARD_MB="0"
+                    MEMORY_PER_SHARD_GB="0"
+                fi
+                
+                echo "📊 Process Memory Statistics (from ps - RSS):"
+                echo "• Total process memory (RSS): ${RSS_GB} GB (${RSS_MB} MB)"
+                echo "• Owner count: ${OWNER_COUNT}"
+                echo "• Shard count: ${SHARD_COUNT}"
+                if [ "$SHARD_COUNT" -gt 0 ] && [ "$MEMORY_PER_SHARD_GB" != "0.000" ]; then
+                    echo "• Memory per shard (estimated): ${MEMORY_PER_SHARD_GB} GB (${MEMORY_PER_SHARD_MB} MB)"
+                fi
+                return
+            fi
+        fi
+    fi
+    
+    echo "⚠️  Could not retrieve memory information (jstat and ps methods failed)"
+}
+
 # Start application with memory profiling
 start_app() {
     echo "🚀 Step 1: Starting Spring PetClinic application (Sharded Memory Mode)"
     echo "JVM parameters: -Xmx32g -Xms2g -XX:+PrintGC -XX:+PrintGCDetails"
-    java -Xmx32g -Xms2g -XX:+PrintGC -XX:+PrintGCDetails -jar target/spring-petclinic-*.jar --app.storage=memory > shard_memory_gc.log 2>&1 &
+    JAR_FILE=$(ls target/spring-petclinic-*.jar 2>/dev/null | head -1)
+    if [ -z "$JAR_FILE" ]; then
+        echo "❌ JAR file not found. Please build the project first: ./mvnw clean package"
+        exit 1
+    fi
+    java -Xmx32g -Xms2g -XX:+PrintGC -XX:+PrintGCDetails -jar "$JAR_FILE" --app.storage=memory > shard_memory_gc.log 2>&1 &
     APP_PID=$!
     
     echo "Waiting for application to start..."
@@ -50,25 +158,35 @@ load_data() {
     # SHARD_SIZE_1=$(curl -s http://localhost:8080/api/owners/1 | grep -o '"id":[0-9]*' | wc -l 2>/dev/null || echo "0")
     # echo "✅ Shard 0 size: $SHARD_SIZE_1 owners"
     
-    echo "Loading additional 10000 owners (should create more shards)..."
-    curl -s -X POST 'http://localhost:8080/api/owners/generate/10000' > /dev/null 2>&1
+    # Get SHARD_SIZE (default 50, should match OwnerShard.SHARD_SIZE)
+    SHARD_SIZE=50
+    SHARD_COUNT=200000
+    EXPECTED_OWNERS=$((SHARD_COUNT * SHARD_SIZE))
+    echo "Loading ${SHARD_COUNT} shards (${SHARD_COUNT} * ${SHARD_SIZE} = ${EXPECTED_OWNERS} owners)..."
+    curl -s -X POST "http://localhost:8080/api/owners/generate-shards/${SHARD_COUNT}" > /dev/null 2>&1
     
     # COUNT_3000=$(curl -s http://localhost:8080/api/owners/count 2>/dev/null || echo "0")
     # echo "✅ After 3000 owners: Total count = $COUNT_3000"
     
     # Test different shard access
     echo "Testing shard access for different IDs..."
-    # SHARD_SIZE_1000=$(curl -s http://localhost:8080/api/owners/1000 | grep -o '"id":[0-9]*' | wc -l 2>/dev/null || echo "0")
-    # SHARD_SIZE_2000=$(curl -s http://localhost:8080/api/owners/2000 | grep -o '"id":[0-9]*' | wc -l 2>/dev/null || echo "0")
-    # SHARD_SIZE_3000=$(curl -s http://localhost:8080/api/owners/3000 | grep -o '"id":[0-9]*' | wc -l 2>/dev/null || echo "0")
-    
+    SHARD_SIZE_1000=$(curl -s http://localhost:8080/api/owners/1000 | grep -o '"id":[0-9]*' | wc -l 2>/dev/null || echo "0")
+    SHARD_SIZE_2000=$(curl -s http://localhost:8080/api/owners/2000 | grep -o '"id":[0-9]*' | wc -l 2>/dev/null || echo "0")
+    SHARD_SIZE_3000=$(curl -s http://localhost:8080/api/owners/3000 | grep -o '"id":[0-9]*' | wc -l 2>/dev/null || echo "0")
+
     echo "✅ Shard 1 (ID 1000): $SHARD_SIZE_1000 owners"
-    echo "✅ Shard 2 (ID 2000): $SHARD_SIZE_2000 owners"  
+    echo "✅ Shard 2 (ID 2000): $SHARD_SIZE_2000 owners"
     echo "✅ Shard 3 (ID 3000): $SHARD_SIZE_3000 owners"
     
     END_TIME=$(date +%s)
     DURATION=$((END_TIME - START_TIME))
     echo "✅ Data loading completed (duration: ${DURATION} seconds)"
+    
+    # Get heap memory usage after data loading
+    echo ""
+    echo "💾 Heap Memory Usage After Data Loading"
+    echo "========================================"
+    check_heap_memory
     
     # Memory usage analysis
     echo ""
@@ -99,14 +217,14 @@ mixed_workload_test() {
     echo ""
     echo "🔄 Step 4: Mixed workload test on sharded data"
     echo "=============================================="
-    echo "Test parameters: 5 threads × 20 seconds (70% GET + 15% INSERT + 15% DELETE)"
+    echo "Test parameters: 10 threads × 20 seconds (70% GET + 15% INSERT + 15% DELETE)"
     
     # Record pre-test state
     PRE_TEST_COUNT=$(curl -s http://localhost:8080/api/owners/count 2>/dev/null || echo "0")
     PRE_TEST_GC=$(grep -c "GC(" shard_memory_gc.log)
     
     START_TIME=$(date +%s)
-    MIXED_RESULT=$(curl -s -X POST 'http://localhost:8080/api/owners/loadtest/5/20/100000' 2>/dev/null)
+    MIXED_RESULT=$(curl -s -X POST 'http://localhost:8080/api/owners/loadtest/10/20/0' 2>/dev/null)
     END_TIME=$(date +%s)
     MIXED_DURATION=$((END_TIME - START_TIME))
     
